@@ -1,0 +1,12 @@
+C:\Users\HYPERPC\source\repos\KG5\x64\Debug\D3D12\D3D12Core.dll
+C:\Users\HYPERPC\source\repos\KG5\x64\Debug\D3D12\D3D12Core.pdb
+C:\Users\HYPERPC\source\repos\KG5\x64\Debug\D3D12\D3D12SDKLayers.dll
+C:\Users\HYPERPC\source\repos\KG5\x64\Debug\D3D12\D3D12SDKLayers.pdb
+E:\_Projects\Git Project\KG_26-27\KG5\x64\Debug\D3D12\D3D12Core.dll
+E:\_Projects\Git Project\KG_26-27\KG5\x64\Debug\D3D12\D3D12Core.pdb
+E:\_Projects\Git Project\KG_26-27\KG5\x64\Debug\D3D12\D3D12SDKLayers.dll
+E:\_Projects\Git Project\KG_26-27\KG5\x64\Debug\D3D12\D3D12SDKLayers.pdb
+E:\_Projects\VS Projects\LAB1\KG5\x64\Debug\D3D12\D3D12Core.dll
+E:\_Projects\VS Projects\LAB1\KG5\x64\Debug\D3D12\D3D12Core.pdb
+E:\_Projects\VS Projects\LAB1\KG5\x64\Debug\D3D12\D3D12SDKLayers.dll
+E:\_Projects\VS Projects\LAB1\KG5\x64\Debug\D3D12\D3D12SDKLayers.pdb
