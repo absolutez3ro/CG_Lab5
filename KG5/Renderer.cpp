@@ -4,13 +4,12 @@
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
+
 static void ThrowIfFailed(HRESULT hr)
 {
 	if (FAILED(hr)) throw std::runtime_error("DirectX call failed");
 }
-// ============================================================================
-// Init
-// ============================================================================
+
 bool Renderer::Init(HWND hwnd, int width, int height)
 {
 	m_width = width;
@@ -30,10 +29,12 @@ bool Renderer::Init(HWND hwnd, int width, int height)
 		CreatePipelineStateObject();
 		CreateCubeGeometry();
 		CreateConstantBuffer();
+		CreateFallbackTexture();
 		ThrowIfFailed(m_cmdList->Close());
 		ID3D12CommandList* cmds[] = { m_cmdList.Get() };
 		m_cmdQueue->ExecuteCommandLists(1, cmds);
 		WaitForGPU();
+		m_fallbackTextureUpload.Reset();
 	}
 	catch (const std::exception& e)
 	{
@@ -43,9 +44,7 @@ bool Renderer::Init(HWND hwnd, int width, int height)
 	m_initialized = true;
 	return true;
 }
-// ============================================================================
-// Device
-// ============================================================================
+
 void Renderer::CreateDevice()
 {
 #ifdef _DEBUG
@@ -68,6 +67,7 @@ void Renderer::CreateDevice()
 		ThrowIfFailed(D3D12CreateDevice(nullptr,
 			D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)));
 }
+
 void Renderer::CreateCommandObjects()
 {
 	D3D12_COMMAND_QUEUE_DESC q{};
@@ -80,6 +80,7 @@ void Renderer::CreateCommandObjects()
 		0, D3D12_COMMAND_LIST_TYPE_DIRECT,
 		m_cmdAllocators[0].Get(), nullptr, IID_PPV_ARGS(&m_cmdList)));
 }
+
 void Renderer::CreateSwapChain(HWND hwnd, int width, int height)
 {
 	DXGI_SWAP_CHAIN_DESC1 sc{};
@@ -95,6 +96,7 @@ void Renderer::CreateSwapChain(HWND hwnd, int width, int height)
 	ThrowIfFailed(sc1.As(&m_swapChain));
 	m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
 }
+
 void Renderer::CreateDescriptorHeaps()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC rtvD{};
@@ -102,11 +104,12 @@ void Renderer::CreateDescriptorHeaps()
 	rtvD.NumDescriptors = FRAME_COUNT;
 	ThrowIfFailed(m_device->CreateDescriptorHeap(&rtvD, IID_PPV_ARGS(&m_rtvHeap)));
 	m_rtvDescSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
 	D3D12_DESCRIPTOR_HEAP_DESC dsvD{};
 	dsvD.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 	dsvD.NumDescriptors = 1;
 	ThrowIfFailed(m_device->CreateDescriptorHeap(&dsvD, IID_PPV_ARGS(&m_dsvHeap)));
-	// slot0 = reserved, slots 1..MAX_TEXTURES = SRVs
+
 	D3D12_DESCRIPTOR_HEAP_DESC cbvD{};
 	cbvD.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	cbvD.NumDescriptors = 1 + MAX_TEXTURES;
@@ -115,6 +118,7 @@ void Renderer::CreateDescriptorHeaps()
 	m_cbvSrvDescSize = m_device->GetDescriptorHandleIncrementSize(
 		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
+
 void Renderer::CreateRenderTargetViews()
 {
 	CD3DX12_CPU_DESCRIPTOR_HANDLE h(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -125,6 +129,7 @@ void Renderer::CreateRenderTargetViews()
 		h.Offset(1, m_rtvDescSize);
 	}
 }
+
 void Renderer::CreateDepthStencilView()
 {
 	D3D12_RESOURCE_DESC d{};
@@ -143,6 +148,7 @@ void Renderer::CreateDepthStencilView()
 	m_device->CreateDepthStencilView(m_depthStencil.Get(), nullptr,
 		m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
 }
+
 void Renderer::CreateFence()
 {
 	ThrowIfFailed(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
@@ -150,6 +156,7 @@ void Renderer::CreateFence()
 	m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	if (!m_fenceEvent) ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 }
+
 void Renderer::CompileShaders()
 {
 	UINT flags = 0;
@@ -170,25 +177,28 @@ void Renderer::CompileShaders()
 		ThrowIfFailed(hr);
 	}
 }
-// ============================================================================
-// Root Signature:
-// param[0] = CBV b0 (VS+PS)
-// param[1] = descriptor table: SRV t0 (PS)
-// static sampler s0: WRAP + LINEAR
-// ============================================================================
+
 void Renderer::CreateRootSignature()
 {
-	CD3DX12_DESCRIPTOR_RANGE srvRange;
-	srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-	CD3DX12_ROOT_PARAMETER params[2];
+	// Добавляем ДВЕ текстуры (t0 и t1)
+	CD3DX12_DESCRIPTOR_RANGE srvRange0;
+	srvRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // Оригинальная текстура (t0)
+
+	CD3DX12_DESCRIPTOR_RANGE srvRange1;
+	srvRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // Вторая текстура для интерполяции (t1)
+
+	CD3DX12_ROOT_PARAMETER params[3];
 	params[0].InitAsConstantBufferView(0);
-	params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+	params[1].InitAsDescriptorTable(1, &srvRange0, D3D12_SHADER_VISIBILITY_PIXEL);
+	params[2].InitAsDescriptorTable(1, &srvRange1, D3D12_SHADER_VISIBILITY_PIXEL);
+
 	CD3DX12_STATIC_SAMPLER_DESC sampler(0,
 		D3D12_FILTER_MIN_MAG_MIP_LINEAR,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP);
-	CD3DX12_ROOT_SIGNATURE_DESC rsDesc(2, params, 1, &sampler,
+
+	CD3DX12_ROOT_SIGNATURE_DESC rsDesc(3, params, 1, &sampler,
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 	ComPtr<ID3DBlob> serialized, errors;
 	HRESULT hr = D3D12SerializeRootSignature(
@@ -201,6 +211,7 @@ void Renderer::CreateRootSignature()
 		0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
 		IID_PPV_ARGS(&m_rootSignature)));
 }
+
 void Renderer::CreatePipelineStateObject()
 {
 	D3D12_INPUT_ELEMENT_DESC layout[] =
@@ -237,9 +248,7 @@ void Renderer::CreatePipelineStateObject()
 	pso.SampleDesc = { 1, 0 };
 	ThrowIfFailed(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_pso)));
 }
-// ============================================================================
-// Default cube
-// ============================================================================
+
 void Renderer::CreateCubeGeometry()
 {
 	std::array<Vertex, 24> verts =
@@ -275,6 +284,7 @@ void Renderer::CreateCubeGeometry()
 	m_gpuMaterials = { mat };
 	UploadMeshToGpu(v, i);
 }
+
 void Renderer::UploadMeshToGpu(const std::vector<Vertex>& verts,
 	const std::vector<UINT>& indices)
 {
@@ -297,11 +307,34 @@ void Renderer::UploadMeshToGpu(const std::vector<Vertex>& verts,
 	m_vbView = { m_vertexBuffer->GetGPUVirtualAddress(), vbSz, sizeof(Vertex) };
 	m_ibView = { m_indexBuffer->GetGPUVirtualAddress(), ibSz, DXGI_FORMAT_R32_UINT };
 }
+
+void Renderer::CreateFallbackTexture()
+{
+	// Slot 0: 1x1 white texture, used as fallback when material has no texture.
+	// Prevents reading from an uninitialized SRV descriptor.
+	TextureLoader::TextureData td;
+	td.width = 1; td.height = 1;
+	td.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	td.rowPitch = 4;
+	td.pixels = { 255, 255, 255, 255 };
+
+	if (TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(),
+		td, m_fallbackTexture, m_fallbackTextureUpload))
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = td.format;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+		CD3DX12_CPU_DESCRIPTOR_HANDLE h(
+			m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 0, m_cbvSrvDescSize);
+		m_device->CreateShaderResourceView(m_fallbackTexture.Get(), &srvDesc, h);
+	}
+}
+
 void Renderer::CreateConstantBuffer()
 {
-	// Each slot must be 256-byte aligned
 	m_cbSlotSize = (sizeof(ConstantBufferData) + 255) & ~255;
-	// Total: FRAME_COUNT frames * MAX_SUBSETS slots each
 	UINT totalSize = m_cbSlotSize * Renderer::MAX_SUBSETS * Renderer::FRAME_COUNT;
 	CD3DX12_HEAP_PROPERTIES hp(D3D12_HEAP_TYPE_UPLOAD);
 	CD3DX12_RESOURCE_DESC rd = CD3DX12_RESOURCE_DESC::Buffer(totalSize);
@@ -310,9 +343,7 @@ void Renderer::CreateConstantBuffer()
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_constantBuffer)));
 	m_constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&m_cbMapped));
 }
-// ============================================================================
-// LoadObj
-// ============================================================================
+
 bool Renderer::LoadObj(const std::string& path)
 {
 	if (m_initialized) FlushCommandQueue();
@@ -326,7 +357,6 @@ bool Renderer::LoadObj(const std::string& path)
 		verts[i].TexCoord = mesh.vertices[i].TexCoord;
 	}
 
-	
 	XMFLOAT3 vmin = { FLT_MAX, FLT_MAX, FLT_MAX };
 	XMFLOAT3 vmax = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
 	for (const auto& v : verts)
@@ -339,7 +369,6 @@ bool Renderer::LoadObj(const std::string& path)
 	m_sceneRadius = 0.5f * sqrtf(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
 	if (m_sceneRadius < 0.001f) m_sceneRadius = 1.0f;
 
-	
 	m_target = m_sceneCenter;
 	m_eye = {
 	m_sceneCenter.x + m_sceneRadius * 0.6f,
@@ -354,14 +383,51 @@ bool Renderer::LoadObj(const std::string& path)
 	ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
 	ThrowIfFailed(m_cmdList->Reset(m_cmdAllocators[m_frameIndex].Get(), nullptr));
 	LoadMaterials(mesh, dir);
+
+	// Генерируем тестовую текстуру (сине-голубую шахматную доску) прямо в памяти
+	TextureLoader::TextureData farTexData;
+	farTexData.width = 256;
+	farTexData.height = 256;
+	farTexData.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	farTexData.rowPitch = 256 * 4;
+	farTexData.pixels.resize(256 * 256 * 4);
+	for (int y = 0; y < 256; ++y)
+	{
+		for (int x = 0; x < 256; ++x)
+		{
+			bool isCyan = ((x / 32) % 2) == ((y / 32) % 2);
+			int idx = (y * 256 + x) * 4;
+			farTexData.pixels[idx] = isCyan ? 50 : 10;   // R
+			farTexData.pixels[idx + 1] = isCyan ? 200 : 20;  // G
+			farTexData.pixels[idx + 2] = isCyan ? 255 : 50;  // B
+			farTexData.pixels[idx + 3] = 255;                // A
+		}
+	}
+
+	if (TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), farTexData, m_farTexture, m_farTextureUpload))
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Format = farTexData.format;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+		m_farTexSrvIndex = MAX_TEXTURES; // Записываем в конец кучи (слот 512)
+		CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), m_farTexSrvIndex, m_cbvSrvDescSize);
+		m_device->CreateShaderResourceView(m_farTexture.Get(), &srvDesc, srvHandle);
+	}
+
 	UploadMeshToGpu(verts, mesh.indices);
 	ThrowIfFailed(m_cmdList->Close());
 	ID3D12CommandList* cmds[] = { m_cmdList.Get() };
 	m_cmdQueue->ExecuteCommandLists(1, cmds);
 	WaitForGPU();
+
 	for (auto& mat : m_gpuMaterials) mat.textureUpload.Reset();
+	m_farTextureUpload.Reset();
+
 	return true;
 }
+
 void Renderer::LoadMaterials(const ObjMesh& mesh, const std::string& baseDir)
 {
 	m_gpuMaterials.clear();
@@ -388,7 +454,6 @@ void Renderer::LoadMaterials(const ObjMesh& mesh, const std::string& baseDir)
 			std::wstring wpath(baseDir.begin(), baseDir.end());
 			std::wstring wtex(src.diffuseTexture.begin(), src.diffuseTexture.end());
 			wpath += wtex;
-			// Debug: show which texture we're trying to load
 			std::wstring dbgMsg = L"Loading texture: " + wpath + L"\n";
 			OutputDebugStringW(dbgMsg.c_str());
 			TextureLoader::TextureData td;
@@ -420,9 +485,6 @@ void Renderer::LoadMaterials(const ObjMesh& mesh, const std::string& baseDir)
 	}
 }
 
-// ============================================================================
-// BeginFrame
-// ============================================================================
 void Renderer::BeginFrame(const float clearColor[4])
 {
 	ThrowIfFailed(m_cmdAllocators[m_frameIndex]->Reset());
@@ -442,9 +504,7 @@ void Renderer::BeginFrame(const float clearColor[4])
 	m_cmdList->RSSetViewports(1, &vp);
 	m_cmdList->RSSetScissorRects(1, &sc);
 }
-// ============================================================================
-// DrawScene
-// ============================================================================
+
 void Renderer::DrawScene(float totalTime, float /*dt*/)
 {
 	if (!m_pso || m_subsets.empty()) return;
@@ -455,16 +515,16 @@ void Renderer::DrawScene(float totalTime, float /*dt*/)
 	m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_cmdList->IASetVertexBuffers(0, 1, &m_vbView);
 	m_cmdList->IASetIndexBuffer(&m_ibView);
-	// No rotation for large static scenes like Sponza
+
 	XMMATRIX world = XMMatrixIdentity();
 	XMMATRIX view = XMMatrixLookAtLH(
 		XMLoadFloat3(&m_eye), XMLoadFloat3(&m_target), XMLoadFloat3(&m_up));
 	float aspect = (float)m_width / (float)m_height;
-	// Far plane 10000 for large scenes like Sponza
 	float nearPlane = (std::max)(0.01f, m_sceneRadius / 1000.0f);
 	float farPlane = (std::max)(100.0f, m_sceneRadius * 50.0f);
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.f), aspect, nearPlane, farPlane);
 	XMMATRIX wit = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
+
 	UINT numSubsets = (UINT)m_subsets.size();
 	for (UINT subIdx = 0; subIdx < numSubsets; ++subIdx)
 	{
@@ -473,12 +533,12 @@ void Renderer::DrawScene(float totalTime, float /*dt*/)
 		int matIdx = (sub.materialIdx >= 0 && sub.materialIdx < (int)m_gpuMaterials.size())
 			? sub.materialIdx : 0;
 		const GpuMaterial& mat = m_gpuMaterials.empty() ? GpuMaterial{} : m_gpuMaterials[matIdx];
-		// Each subset gets its own CB slot: frameIndex * MAX_SUBSETS + subIdx
-		// If more subsets than MAX_SUBSETS, wrap around (safe for static CBs)
+
 		UINT slotIdx = m_frameIndex * Renderer::MAX_SUBSETS + (subIdx % Renderer::MAX_SUBSETS);
 		UINT8* slotPtr = reinterpret_cast<UINT8*>(m_cbMapped) + slotIdx * m_cbSlotSize;
 		D3D12_GPU_VIRTUAL_ADDRESS cbAddr =
 			m_constantBuffer->GetGPUVirtualAddress() + slotIdx * m_cbSlotSize;
+
 		ConstantBufferData cb{};
 		XMStoreFloat4x4(&cb.World, XMMatrixTranspose(world));
 		XMStoreFloat4x4(&cb.View, XMMatrixTranspose(view));
@@ -497,20 +557,29 @@ void Renderer::DrawScene(float totalTime, float /*dt*/)
 		cb.TexTilingY = m_texTiling.y;
 		cb.TexScrollX = m_texScroll.x;
 		cb.TexScrollY = m_texScroll.y;
+
+		// Переход начинается на 3x радиуса сцены, заканчивается на 8x.
+		// Камера стартует на ~1.77x радиуса — при этом видна оригинальная текстура.
+		cb.FadeStart = m_sceneRadius * 3.0f;
+		cb.FadeEnd   = m_sceneRadius * 8.0f;
+
 		memcpy(slotPtr, &cb, sizeof(cb));
 		m_cmdList->SetGraphicsRootConstantBufferView(0, cbAddr);
-		// Bind SRV
+
+		// Передаем текстуру 1 (оригинальную) - ЗДЕСЬ ИЗМЕНЕН CPU НА GPU
 		int srvIdx = (mat.hasTexture && mat.srvHeapIndex >= 0) ? mat.srvHeapIndex : 0;
-		CD3DX12_GPU_DESCRIPTOR_HANDLE srvH(
-			m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(),
-			srvIdx, m_cbvSrvDescSize);
-		m_cmdList->SetGraphicsRootDescriptorTable(1, srvH);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE srvH0(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), srvIdx, m_cbvSrvDescSize);
+		m_cmdList->SetGraphicsRootDescriptorTable(1, srvH0);
+
+		// Передаем текстуру 2 (нашу новую шахматную доску) - ЗДЕСЬ ИЗМЕНЕН CPU НА GPU
+		int farIdx = (m_farTexSrvIndex >= 0) ? m_farTexSrvIndex : 0;
+		CD3DX12_GPU_DESCRIPTOR_HANDLE srvH1(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), farIdx, m_cbvSrvDescSize);
+		m_cmdList->SetGraphicsRootDescriptorTable(2, srvH1);
+
 		m_cmdList->DrawIndexedInstanced(sub.indexCount, 1, sub.indexStart, 0, 0);
 	}
 }
-// ============================================================================
-// EndFrame
-// ============================================================================
+
 void Renderer::EndFrame()
 {
 	CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -523,6 +592,7 @@ void Renderer::EndFrame()
 	ThrowIfFailed(m_swapChain->Present(1, 0));
 	MoveToNextFrame();
 }
+
 void Renderer::WaitForGPU()
 {
 	const UINT64 val = m_fenceValues[m_frameIndex];
@@ -534,6 +604,7 @@ void Renderer::WaitForGPU()
 		WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 	}
 }
+
 void Renderer::MoveToNextFrame()
 {
 	const UINT64 cur = m_fenceValues[m_frameIndex];
@@ -547,7 +618,9 @@ void Renderer::MoveToNextFrame()
 	}
 	m_fenceValues[m_frameIndex] = cur + 1;
 }
+
 void Renderer::FlushCommandQueue() { WaitForGPU(); }
+
 void Renderer::OnResize(int width, int height)
 {
 	if (!m_initialized || (m_width == width && m_height == height)) return;
@@ -561,6 +634,7 @@ void Renderer::OnResize(int width, int height)
 	CreateRenderTargetViews();
 	CreateDepthStencilView();
 }
+
 Renderer::~Renderer()
 {
 	if (m_initialized) FlushCommandQueue();

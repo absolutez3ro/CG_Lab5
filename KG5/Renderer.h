@@ -43,7 +43,8 @@ struct alignas(256) ConstantBufferData
 	float TexTilingY;
 	float TexScrollX;
 	float TexScrollY;
-	float Pad[2];
+	float FadeStart;
+	float FadeEnd;
 	int HasTexture;
 	int Pad2[3];
 };
@@ -61,8 +62,8 @@ class Renderer
 {
 public:
 	static constexpr UINT FRAME_COUNT = 2;
-	static constexpr UINT MAX_TEXTURES = 512; // Sponza has ~100 textures
-	static constexpr UINT MAX_SUBSETS = 512; // Sponza has ~100 subsets
+	static constexpr UINT MAX_TEXTURES = 512;
+	static constexpr UINT MAX_SUBSETS = 512;
 	Renderer() = default;
 	~Renderer();
 	bool Init(HWND hwnd, int width, int height);
@@ -70,9 +71,7 @@ public:
 	void DrawScene(float totalTime, float deltaTime);
 	void EndFrame();
 	void OnResize(int width, int height);
-	// Load OBJ (replaces cube). Call after Init.
 	bool LoadObj(const std::string& path);
-	// Texture animation params (can be set at runtime)
 	void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
 	void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
 private:
@@ -91,6 +90,7 @@ private:
 	void CreateConstantBuffer();
 	void CompileShaders();
 	void LoadMaterials(const ObjMesh& mesh, const std::string& baseDir);
+	void CreateFallbackTexture();
 	void WaitForGPU();
 	void FlushCommandQueue();
 	void MoveToNextFrame();
@@ -103,10 +103,9 @@ private:
 	ComPtr<ID3D12Resource> m_renderTargets[FRAME_COUNT];
 	UINT m_frameIndex = 0;
 	ComPtr<ID3D12Resource> m_depthStencil;
-	// Heaps
 	ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
 	ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
-	ComPtr<ID3D12DescriptorHeap> m_cbvSrvHeap; // slot0=CBV, slots1+=SRV
+	ComPtr<ID3D12DescriptorHeap> m_cbvSrvHeap;
 	UINT m_rtvDescSize = 0;
 	UINT m_cbvSrvDescSize = 0;
 	ComPtr<ID3D12Fence> m_fence;
@@ -122,19 +121,26 @@ private:
 	D3D12_INDEX_BUFFER_VIEW m_ibView{};
 	std::vector<MeshSubset> m_subsets;
 	std::vector<GpuMaterial> m_gpuMaterials;
-	// Constant buffer: one slot per subset per frame
-	// Layout: [frame0: subset0, subset1, ...], [frame1: subset0, subset1, ...]
 	ComPtr<ID3D12Resource> m_constantBuffer;
-	ConstantBufferData* m_cbMapped = nullptr; // base pointer
-	UINT m_cbSlotSize = 0; // size of one slot (256-aligned)
+	ConstantBufferData* m_cbMapped = nullptr;
+	UINT m_cbSlotSize = 0;
 	XMFLOAT2 m_texTiling = { 1.f, 1.f };
 	XMFLOAT2 m_texScroll = { 0.05f, 0.f };
 	int m_width = 0;
 	int m_height = 0;
-	XMFLOAT3 m_eye = { -1000.f, 150.f, 0.f }; // Sponza is ~1000 units wide
+	XMFLOAT3 m_eye = { -1000.f, 150.f, 0.f };
 	XMFLOAT3 m_target = { 0.f, 150.f, 0.f };
 	XMFLOAT3 m_up = { 0.f, 1.f, 0.f };
 	XMFLOAT3 m_sceneCenter = { 0.f,0.f,0.f };
 	float m_sceneRadius = 1.f;
 	bool m_initialized = false;
+
+	// Белая текстура-заглушка для слота 0 (fallback когда нет текстуры)
+	ComPtr<ID3D12Resource> m_fallbackTexture;
+	ComPtr<ID3D12Resource> m_fallbackTextureUpload;
+
+	// Переменные для второй (процедурной) текстуры
+	ComPtr<ID3D12Resource> m_farTexture;
+	ComPtr<ID3D12Resource> m_farTextureUpload;
+	int m_farTexSrvIndex = -1;
 };

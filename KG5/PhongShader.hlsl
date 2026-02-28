@@ -1,4 +1,5 @@
-Texture2D gDiffuseMap : register(t0);
+Texture2D gDiffuseMap : register(t0); // Оригинальная текстура
+Texture2D gFarMap     : register(t1); // Шахматная текстура для дали
 SamplerState gSampler : register(s0);
 
 cbuffer ConstantBuffer : register(b0)
@@ -19,7 +20,8 @@ cbuffer ConstantBuffer : register(b0)
     float gTexTilingY;
     float gTexScrollX;
     float gTexScrollY;
-    float2 gPad;
+    float gFadeStart; 
+    float gFadeEnd;   
     int gHasTexture;
     int3 gPad2;
 };
@@ -55,14 +57,25 @@ PSInput VSMain(VSInput vin)
 
 float4 PSMain(PSInput pin) : SV_TARGET
 {
+    // --- 1. Считаем дистанцию и фактор смешивания ---
+    float dist = distance(gEyePos.xyz, pin.PositionW);
+    float fadeFactor = saturate((dist - gFadeStart) / (gFadeEnd - gFadeStart));
+
+    // --- 2. Получаем цвета из ДВУХ ТЕКСТУР ---
+    // Цвет из вашей оригинальной текстуры (с проверкой на наличие текстуры)
+    float4 colorNear = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord) : gMaterialDiffuse;
+    
+    // Цвет из нашей синей шахматной текстуры
+    float4 colorFar = gFarMap.Sample(gSampler, pin.TexCoord);
+
+    // --- 3. ИНТЕРПОЛЯЦИЯ МЕЖДУ ТЕКСТУРАМИ ---
+    float4 baseColor = lerp(colorNear, colorFar, fadeFactor);
+
+    // --- 4. Применяем освещение к уже смешанной текстуре ---
     float3 N = normalize(pin.NormalW);
     float3 L = normalize(-gLightDir.xyz);
     float3 V = normalize(gEyePos.xyz - pin.PositionW);
     float3 R = reflect(-L, N);
-
-    float4 baseColor = gHasTexture
-        ? gDiffuseMap.Sample(gSampler, pin.TexCoord)
-        : gMaterialDiffuse;
 
     float3 ambient = gAmbientColor.rgb * baseColor.rgb;
     float diffFactor = max(dot(N, L), 0.0f);
