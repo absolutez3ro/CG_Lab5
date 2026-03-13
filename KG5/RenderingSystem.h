@@ -96,6 +96,8 @@ private:
     ComPtr<ID3D12Resource> m_objectCB;
     ComPtr<ID3D12Resource> m_frameCB;
     ComPtr<ID3D12Resource> m_lightVolCB;
+    UINT m_objectCbStride = 0;
+    UINT m_maxObjectCbCount = 0;
 
     XMFLOAT4X4 m_view{};
     XMFLOAT4X4 m_proj{};

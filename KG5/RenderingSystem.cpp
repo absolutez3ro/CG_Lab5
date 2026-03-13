@@ -3,7 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <stdexcept>
-#include <cstddef>
+#include <cstdint>
 
 using namespace DirectX;
 
@@ -40,7 +40,9 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     CreateLightMeshes();
     SetupSceneLights();
 
-    m_renderer.CreateBuffer(nullptr, sizeof(ObjectConstants) * 1024, &m_objectCB);
+    m_objectCbStride = (sizeof(ObjectConstants) + 255u) & ~255u;
+    m_maxObjectCbCount = 8192;
+    m_renderer.CreateBuffer(nullptr, m_objectCbStride * m_maxObjectCbCount, &m_objectCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightingFrameConstants), &m_frameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightVolumeConstants), &m_lightVolCB);
 
@@ -330,8 +332,18 @@ void RenderingSystem::GeometryPass()
     const auto& subsets = m_renderer.GetSubsets();
     const auto& materials = m_renderer.GetMaterials();
 
+    if (subsets.empty())
+        return;
+
+    void* mapped = nullptr;
+    m_objectCB->Map(0, nullptr, &mapped);
+    std::uint8_t* cbBase = reinterpret_cast<std::uint8_t*>(mapped);
+
     for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
     {
+        if (subsetIndex >= m_maxObjectCbCount)
+            break;
+
         const auto& s = subsets[subsetIndex];
 
         ObjectConstants obj{};
@@ -358,17 +370,15 @@ void RenderingSystem::GeometryPass()
             }
         }
 
-        void* mapped = nullptr;
-        m_objectCB->Map(0, nullptr, &mapped);
-        std::byte* cbBase = reinterpret_cast<std::byte*>(mapped);
-        const UINT cbOffset = static_cast<UINT>(subsetIndex * sizeof(ObjectConstants));
+        const UINT cbOffset = static_cast<UINT>(subsetIndex * m_objectCbStride);
         memcpy(cbBase + cbOffset, &obj, sizeof(obj));
-        m_objectCB->Unmap(0, nullptr);
 
         cmdList->SetGraphicsRootConstantBufferView(0, m_objectCB->GetGPUVirtualAddress() + cbOffset);
         cmdList->SetGraphicsRootDescriptorTable(1, m_renderer.GetSrvGpuHandle(textureSrv));
         cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
     }
+
+    m_objectCB->Unmap(0, nullptr);
 }
 
 void RenderingSystem::UpdateFrameConstants()
