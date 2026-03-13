@@ -407,6 +407,12 @@ bool Renderer::LoadObj(const std::string& path)
                     m_gpuMaterials[i].texture,
                     m_gpuMaterials[i].textureUpload))
                 {
+                    if (m_nextSrvIndex >= 256)
+                    {
+                        m_gpuMaterials[i].srvHeapIndex = -1;
+                        continue;
+                    }
+
                     m_gpuMaterials[i].srvHeapIndex = static_cast<int>(m_nextSrvIndex++);
                     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
                     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;

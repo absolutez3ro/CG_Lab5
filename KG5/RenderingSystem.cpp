@@ -238,7 +238,7 @@ void RenderingSystem::CreateLightMeshes()
         for (UINT slice = 0; slice <= sliceCount; ++slice)
         {
             const float theta = XM_2PI * slice / sliceCount;
-            vertices.push_back({ XMFLOAT3(std::sinf(phi) * std::cosf(theta), std::cosf(phi), std::sinf(phi) * std::sinf(theta)) });
+            vertices.push_back({ XMFLOAT3(std::sin(phi) * std::cos(theta), std::cos(phi), std::sin(phi) * std::sin(theta)) });
         }
     }
     vertices.push_back({ XMFLOAT3(0.f, -1.f, 0.f) });
