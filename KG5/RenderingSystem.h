@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Renderer.h"
 #include "GBuffer.h"
+#include <array>
 
 struct alignas(256) LightingFrameConstants
 {
@@ -34,9 +35,28 @@ public:
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
 
 private:
+    struct PointLight
+    {
+        XMFLOAT3 Position;
+        float Range;
+        XMFLOAT3 Color;
+        float Intensity;
+    };
+
+    struct SpotLight
+    {
+        XMFLOAT3 Position;
+        float Range;
+        XMFLOAT3 Direction;
+        float CosAngle;
+        XMFLOAT3 Color;
+        float Intensity;
+    };
+
     void CreateRootSignatures();
     void CreatePSOs();
     void CreateLightMeshes();
+    void SetupSceneLights();
 
     void GeometryPass();
     void LightingPassDirectional();
@@ -44,8 +64,8 @@ private:
     void LightingPassSpot();
 
     void UpdateFrameConstants();
-    void UpdatePointLightCB(const XMFLOAT3& pos, float range, const XMFLOAT3& color, float intensity);
-    void UpdateSpotLightCB(const XMFLOAT3& pos, float range, const XMFLOAT3& dir, float cosAngle, const XMFLOAT3& color, float intensity);
+    void UpdatePointLightCB(const PointLight& light);
+    void UpdateSpotLightCB(const SpotLight& light);
 
 private:
     Renderer m_renderer;
@@ -64,8 +84,8 @@ private:
 
     ComPtr<ID3DBlob> m_geoVS;
     ComPtr<ID3DBlob> m_geoPS;
+    ComPtr<ID3DBlob> m_lightFullscreenVS;
     ComPtr<ID3DBlob> m_lightVS;
-    ComPtr<ID3DBlob> m_lightPS;
 
     ComPtr<ID3D12Resource> m_sphereVB;
     ComPtr<ID3D12Resource> m_sphereIB;
@@ -76,4 +96,11 @@ private:
     ComPtr<ID3D12Resource> m_objectCB;
     ComPtr<ID3D12Resource> m_frameCB;
     ComPtr<ID3D12Resource> m_lightVolCB;
+
+    XMFLOAT4X4 m_view{};
+    XMFLOAT4X4 m_proj{};
+    XMFLOAT3 m_eyePos = { 0.0f, 120.0f, -300.0f };
+
+    std::array<PointLight, 6> m_pointLights{};
+    std::array<SpotLight, 2> m_spotLights{};
 };

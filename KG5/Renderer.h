@@ -56,6 +56,8 @@ public:
     ID3D12DescriptorHeap* GetSrvHeap() { return m_cbvSrvHeap.Get(); }
     UINT GetRtvDescriptorSize() { return m_rtvDescSize; }
     UINT GetSrvDescriptorSize() { return m_cbvSrvDescSize; }
+    UINT GetWidth() const { return static_cast<UINT>(m_width); }
+    UINT GetHeight() const { return static_cast<UINT>(m_height); }
 
     // ВАЖНО: Хендлы для рендеринга
     D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRtv() {
@@ -120,4 +122,7 @@ private:
 
     int m_width = 1280, m_height = 720;
     bool m_initialized = false;
+
+    D3D12_VIEWPORT m_viewport{};
+    D3D12_RECT m_scissorRect{};
 };

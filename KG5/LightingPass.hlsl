@@ -17,9 +17,9 @@ cbuffer LightingFrameCB : register(b0)
 cbuffer LightVolumeCB : register(b1)
 {
     float4x4 gWorldViewProj;
-    float4 gPositionRange;   // xyz, range
-    float4 gDirectionCos;    // xyz, cosAngle
-    float4 gColorIntensity;  // rgb, intensity
+    float4 gPositionRange;
+    float4 gDirectionCos;
+    float4 gColorIntensity;
 };
 
 struct VSInput
@@ -31,6 +31,21 @@ struct VSOutput
 {
     float4 PositionH : SV_POSITION;
 };
+
+struct VSFullscreenOutput
+{
+    float4 PositionH : SV_POSITION;
+    float2 UV : TEXCOORD0;
+};
+
+VSFullscreenOutput VSFullscreen(uint vertexID : SV_VertexID)
+{
+    VSFullscreenOutput o;
+    float2 pos = float2((vertexID << 1) & 2, vertexID & 2);
+    o.UV = pos;
+    o.PositionH = float4(pos * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    return o;
+}
 
 VSOutput VSVolume(VSInput vin)
 {
@@ -49,26 +64,29 @@ float3 DecodeNormal(float3 n)
     return normalize(n * 2.0f - 1.0f);
 }
 
-float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 L, float3 lightCol, float atten)
+float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColor, float specPower, float3 L, float3 lightCol, float atten)
 {
     float3 H = normalize(L + V);
     float diff = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), 32.0);
-    return (albedo * diff + spec.xxx) * lightCol * atten;
+    float spec = pow(max(dot(N, H), 0.0), max(specPower, 1.0));
+    return (albedo * diff + specColor * spec) * lightCol * atten;
 }
 
-float4 PSDirectional(VSOutput pin) : SV_Target
+float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 {
-    float2 uv = GetUV(pin.PositionH);
+    float2 uv = pin.UV;
 
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     float3 normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
+    float3 posW = gPositionTex.Sample(gSampler, uv).xyz;
+    float4 mat = gMaterialTex.Sample(gSampler, uv);
+    float3 specColor = mat.rgb;
+    float specPower = saturate(mat.a) * 255.0f;
 
+    float3 V = normalize(gEyePos.xyz - posW);
     float3 L = normalize(-gDirLightDirection.xyz);
-    float diff = max(dot(normal, L), 0.0);
-
-    float3 color = albedo * gAmbientColor.rgb +
-                   albedo * gDirLightColorIntensity.rgb * gDirLightColorIntensity.a * diff;
+    float3 lit = CalcLighting(posW, normal, V, albedo, specColor, specPower, L, gDirLightColorIntensity.rgb, gDirLightColorIntensity.a);
+    float3 color = albedo * gAmbientColor.rgb + lit;
 
     return float4(color, 1.0f);
 }
@@ -80,6 +98,9 @@ float4 PSPoint(VSOutput pin) : SV_Target
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
+    float4 mat = gMaterialTex.Sample(gSampler, uv);
+    float3 specColor = mat.rgb;
+    float specPower = saturate(mat.a) * 255.0f;
     float3 V = normalize(gEyePos.xyz - P);
 
     float3 lightVec = gPositionRange.xyz - P;
@@ -92,11 +113,7 @@ float4 PSPoint(VSOutput pin) : SV_Target
     float atten = saturate(1.0f - dist / range);
     float3 L = lightVec / dist;
 
-    float3 result = CalcLighting(
-        P, N, V, albedo, L,
-        gColorIntensity.rgb,
-        gColorIntensity.a * atten * atten);
-
+    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten * atten);
     return float4(result, 1.0f);
 }
 
@@ -107,6 +124,9 @@ float4 PSSpot(VSOutput pin) : SV_Target
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
+    float4 mat = gMaterialTex.Sample(gSampler, uv);
+    float3 specColor = mat.rgb;
+    float specPower = saturate(mat.a) * 255.0f;
     float3 V = normalize(gEyePos.xyz - P);
 
     float3 lightVec = gPositionRange.xyz - P;
@@ -125,10 +145,6 @@ float4 PSSpot(VSOutput pin) : SV_Target
     float cone = smoothstep(gDirectionCos.w, min(gDirectionCos.w + 0.08f, 1.0f), theta);
     float atten = saturate(1.0f - dist / range);
 
-    float3 result = CalcLighting(
-        P, N, V, albedo, L,
-        gColorIntensity.rgb,
-        gColorIntensity.a * atten * cone);
-
+    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten * cone);
     return float4(result, 1.0f);
 }
