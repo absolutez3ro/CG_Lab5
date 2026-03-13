@@ -1,5 +1,6 @@
 ﻿#include "Renderer.h"
 #include <stdexcept>
+#include <filesystem>
 
 static void ThrowIfFailedRenderer(HRESULT hr)
 {
@@ -26,6 +27,7 @@ bool Renderer::Init(HWND hwnd, int width, int height)
         CreateRenderTargetViews();
         CreateDepthStencilView();
         CreateFence();
+        CreateDefaultTexture();
 
         m_viewport = { 0.0f, 0.0f, static_cast<float>(m_width), static_cast<float>(m_height), 0.0f, 1.0f };
         m_scissorRect = { 0, 0, m_width, m_height };
@@ -150,13 +152,50 @@ void Renderer::CreateDescriptorHeaps()
     ThrowIfFailedRenderer(m_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_dsvHeap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = 64;
+    srvHeapDesc.NumDescriptors = 256;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailedRenderer(m_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_cbvSrvHeap)));
 
     m_rtvDescSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     m_cbvSrvDescSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void Renderer::CreateDefaultTexture()
+{
+    TextureLoader::TextureData defaultTex;
+    defaultTex.width = 1;
+    defaultTex.height = 1;
+    defaultTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultTex.rowPitch = 4;
+    defaultTex.pixels = { 255, 255, 255, 255 };
+
+    ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
+    ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
+
+    if (!TextureLoader::CreateTexture(
+        m_device.Get(),
+        m_cmdList.Get(),
+        defaultTex,
+        m_defaultWhiteTexture,
+        m_defaultWhiteUpload))
+    {
+        throw std::runtime_error("Failed to create default texture");
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    auto cpuHandle = m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_device->CreateShaderResourceView(m_defaultWhiteTexture.Get(), &srvDesc, cpuHandle);
+
+    ThrowIfFailedRenderer(m_cmdList->Close());
+    ID3D12CommandList* cmdLists[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmdLists);
+    WaitForGPU();
 }
 
 void Renderer::CreateRenderTargetViews()
@@ -342,12 +381,48 @@ bool Renderer::LoadObj(const std::string& path)
     m_subsets = mesh.subsets;
     m_gpuMaterials.clear();
     m_gpuMaterials.resize(mesh.materials.size());
+    m_nextSrvIndex = 8;
+
+    const std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
+
+    ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
+    ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
 
     for (size_t i = 0; i < mesh.materials.size(); ++i)
     {
         m_gpuMaterials[i].diffuse = mesh.materials[i].diffuse;
         m_gpuMaterials[i].specular = mesh.materials[i].specular;
         m_gpuMaterials[i].specPower = mesh.materials[i].shininess;
+
+        if (!mesh.materials[i].diffuseTexture.empty())
+        {
+            std::filesystem::path texPath = baseDir / mesh.materials[i].diffuseTexture;
+            TextureLoader::TextureData texData;
+            if (TextureLoader::LoadFromFile(texPath.wstring(), texData))
+            {
+                if (TextureLoader::CreateTexture(
+                    m_device.Get(),
+                    m_cmdList.Get(),
+                    texData,
+                    m_gpuMaterials[i].texture,
+                    m_gpuMaterials[i].textureUpload))
+                {
+                    m_gpuMaterials[i].srvHeapIndex = static_cast<int>(m_nextSrvIndex++);
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srvDesc.Format = texData.format;
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MipLevels = 1;
+
+                    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+                        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+                        m_gpuMaterials[i].srvHeapIndex,
+                        m_cbvSrvDescSize);
+
+                    m_device->CreateShaderResourceView(m_gpuMaterials[i].texture.Get(), &srvDesc, cpuHandle);
+                }
+            }
+        }
     }
 
     CreateBuffer(
@@ -367,6 +442,11 @@ bool Renderer::LoadObj(const std::string& path)
     m_ibView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
     m_ibView.Format = DXGI_FORMAT_R32_UINT;
     m_ibView.SizeInBytes = static_cast<UINT>(mesh.indices.size() * sizeof(UINT));
+
+    ThrowIfFailedRenderer(m_cmdList->Close());
+    ID3D12CommandList* cmdLists[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmdLists);
+    WaitForGPU();
 
     return true;
 }

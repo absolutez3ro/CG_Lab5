@@ -58,6 +58,9 @@ public:
     UINT GetSrvDescriptorSize() { return m_cbvSrvDescSize; }
     UINT GetWidth() const { return static_cast<UINT>(m_width); }
     UINT GetHeight() const { return static_cast<UINT>(m_height); }
+    D3D12_GPU_DESCRIPTOR_HANDLE GetSrvGpuHandle(UINT index) const {
+        return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), index, m_cbvSrvDescSize);
+    }
 
     // ВАЖНО: Хендлы для рендеринга
     D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRtv() {
@@ -91,6 +94,7 @@ private:
     void CreateRenderTargetViews();
     void CreateDepthStencilView();
     void CreateFence();
+    void CreateDefaultTexture();
     void WaitForGPU();
     void MoveToNextFrame();
 
@@ -115,6 +119,8 @@ private:
 
     ComPtr<ID3D12Resource> m_vertexBuffer;
     ComPtr<ID3D12Resource> m_indexBuffer;
+    ComPtr<ID3D12Resource> m_defaultWhiteTexture;
+    ComPtr<ID3D12Resource> m_defaultWhiteUpload;
     D3D12_VERTEX_BUFFER_VIEW m_vbView{};
     D3D12_INDEX_BUFFER_VIEW m_ibView{};
     std::vector<MeshSubset> m_subsets;
@@ -122,6 +128,7 @@ private:
 
     int m_width = 1280, m_height = 720;
     bool m_initialized = false;
+    UINT m_nextSrvIndex = 8;
 
     D3D12_VIEWPORT m_viewport{};
     D3D12_RECT m_scissorRect{};

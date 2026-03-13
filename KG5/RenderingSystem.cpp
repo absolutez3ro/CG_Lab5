@@ -3,6 +3,7 @@
 #include <vector>
 #include <cmath>
 #include <stdexcept>
+#include <cstddef>
 
 using namespace DirectX;
 
@@ -327,29 +328,49 @@ void RenderingSystem::GeometryPass()
     cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
     cmdList->IASetIndexBuffer(m_renderer.GetIbView());
 
-    ObjectConstants obj{};
-    XMStoreFloat4x4(&obj.World, XMMatrixTranspose(XMMatrixIdentity()));
-    obj.View = m_view;
-    obj.Proj = m_proj;
-    XMStoreFloat4x4(&obj.WorldInvTranspose, XMMatrixTranspose(XMMatrixIdentity()));
-    obj.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
-    obj.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
-    obj.SpecularPower = 32.0f;
-    obj.HasTexture = 0;
-
-    void* mapped = nullptr;
-    m_objectCB->Map(0, nullptr, &mapped);
-    memcpy(mapped, &obj, sizeof(obj));
-    m_objectCB->Unmap(0, nullptr);
-    cmdList->SetGraphicsRootConstantBufferView(0, m_objectCB->GetGPUVirtualAddress());
-
     ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
-    cmdList->SetGraphicsRootDescriptorTable(1, m_renderer.GetGbufferSrvGpuStart());
 
     const auto& subsets = m_renderer.GetSubsets();
-    for (const auto& s : subsets)
+    const auto& materials = m_renderer.GetMaterials();
+
+    for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
     {
+        const auto& s = subsets[subsetIndex];
+
+        ObjectConstants obj{};
+        XMStoreFloat4x4(&obj.World, XMMatrixTranspose(XMMatrixIdentity()));
+        obj.View = m_view;
+        obj.Proj = m_proj;
+        XMStoreFloat4x4(&obj.WorldInvTranspose, XMMatrixTranspose(XMMatrixIdentity()));
+        obj.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
+        obj.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
+        obj.SpecularPower = 32.0f;
+        obj.HasTexture = 0;
+
+        UINT textureSrv = 0;
+        if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
+        {
+            const auto& mat = materials[s.materialIdx];
+            obj.MaterialDiffuse = mat.diffuse;
+            obj.MaterialSpecular = mat.specular;
+            obj.SpecularPower = mat.specPower;
+            if (mat.srvHeapIndex >= 0)
+            {
+                obj.HasTexture = 1;
+                textureSrv = static_cast<UINT>(mat.srvHeapIndex);
+            }
+        }
+
+        void* mapped = nullptr;
+        m_objectCB->Map(0, nullptr, &mapped);
+        std::byte* cbBase = reinterpret_cast<std::byte*>(mapped);
+        const UINT cbOffset = static_cast<UINT>(subsetIndex * sizeof(ObjectConstants));
+        memcpy(cbBase + cbOffset, &obj, sizeof(obj));
+        m_objectCB->Unmap(0, nullptr);
+
+        cmdList->SetGraphicsRootConstantBufferView(0, m_objectCB->GetGPUVirtualAddress() + cbOffset);
+        cmdList->SetGraphicsRootDescriptorTable(1, m_renderer.GetSrvGpuHandle(textureSrv));
         cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
     }
 }
