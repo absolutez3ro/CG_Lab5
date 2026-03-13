@@ -428,7 +428,8 @@ void RenderingSystem::UpdateSpotLightCB(const SpotLight& light)
     LightVolumeConstants cb{};
     XMStoreFloat4x4(&cb.WorldViewProj, XMMatrixTranspose(world * view * proj));
     cb.PositionRange = XMFLOAT4(light.Position.x, light.Position.y, light.Position.z, light.Range);
-    cb.DirectionCos = XMFLOAT4(normDir.x, normDir.y, normDir.z, light.CosAngle);
+    const float clampedCos = std::max(0.0f, std::min(light.CosAngle, 0.999f));
+    cb.DirectionCos = XMFLOAT4(normDir.x, normDir.y, normDir.z, clampedCos);
     cb.ColorIntensity = XMFLOAT4(light.Color.x, light.Color.y, light.Color.z, light.Intensity);
 
     void* mapped = nullptr;

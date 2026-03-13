@@ -93,7 +93,7 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 
 float4 PSPoint(VSOutput pin) : SV_Target
 {
-    float2 uv = GetUV(pin.PositionH);
+    float2 uv = saturate(GetUV(pin.PositionH));
 
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
@@ -111,15 +111,16 @@ float4 PSPoint(VSOutput pin) : SV_Target
         discard;
 
     float atten = saturate(1.0f - dist / range);
+    atten *= atten;
     float3 L = lightVec / dist;
 
-    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten * atten);
+    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten);
     return float4(result, 1.0f);
 }
 
 float4 PSSpot(VSOutput pin) : SV_Target
 {
-    float2 uv = GetUV(pin.PositionH);
+    float2 uv = saturate(GetUV(pin.PositionH));
 
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
@@ -137,13 +138,17 @@ float4 PSSpot(VSOutput pin) : SV_Target
         discard;
 
     float3 L = lightVec / dist;
-
-    float theta = dot(L, normalize(-gDirectionCos.xyz));
-    if (theta < gDirectionCos.w)
+    float3 spotDir = normalize(gDirectionCos.xyz);
+    float3 lightToPoint = normalize(P - gPositionRange.xyz);
+    float theta = dot(lightToPoint, spotDir);
+    float outerCos = saturate(gDirectionCos.w);
+    if (theta < outerCos)
         discard;
 
-    float cone = smoothstep(gDirectionCos.w, min(gDirectionCos.w + 0.08f, 1.0f), theta);
+    float innerCos = saturate(lerp(outerCos, 1.0f, 0.20f));
+    float cone = smoothstep(outerCos, innerCos, theta);
     float atten = saturate(1.0f - dist / range);
+    atten *= atten;
 
     float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten * cone);
     return float4(result, 1.0f);
