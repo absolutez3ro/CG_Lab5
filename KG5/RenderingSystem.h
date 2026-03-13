@@ -34,6 +34,12 @@ public:
     void SetTexTiling(float x, float y) { m_texTiling = { x, y }; }
     void SetTexScroll(float x, float y) { m_texScroll = { x, y }; }
 
+    void OnKeyDown(WPARAM key);
+    void OnKeyUp(WPARAM key);
+    void OnMouseDown(int x, int y);
+    void OnMouseUp();
+    void OnMouseMove(int x, int y);
+
 private:
     struct PointLight
     {
@@ -64,6 +70,8 @@ private:
     void LightingPassSpot();
 
     void UpdateFrameConstants();
+    void UpdateCamera(float dt);
+    void UpdateViewMatrix();
     void UpdatePointLightCB(const PointLight& light);
     void UpdateSpotLightCB(const SpotLight& light);
 
@@ -101,7 +109,21 @@ private:
 
     XMFLOAT4X4 m_view{};
     XMFLOAT4X4 m_proj{};
-    XMFLOAT3 m_eyePos = { 0.0f, 120.0f, -300.0f };
+    XMFLOAT3 m_cameraPos = { 0.0f, 120.0f, -300.0f };
+    float m_yaw = 0.0f;
+    float m_pitch = 0.0f;
+    float m_moveSpeed = 350.0f;
+    float m_mouseSensitivity = 0.0035f;
+
+    bool m_moveForward = false;
+    bool m_moveBackward = false;
+    bool m_moveLeft = false;
+    bool m_moveRight = false;
+
+    bool m_mouseLookActive = false;
+    bool m_hasLastMouse = false;
+    int m_lastMouseX = 0;
+    int m_lastMouseY = 0;
 
     std::array<PointLight, 6> m_pointLights{};
     std::array<SpotLight, 2> m_spotLights{};

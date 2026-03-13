@@ -29,8 +29,8 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         m_renderer.GetSrvDescriptorSize());
 
     XMMATRIX view = XMMatrixLookAtLH(
-        XMVectorSet(0.0f, 120.0f, -300.0f, 1.0f),
-        XMVectorSet(0.0f, 120.0f, 0.0f, 1.0f),
+        XMLoadFloat3(&m_cameraPos),
+        XMVectorSet(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z + 1.0f, 1.0f),
         XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
     XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(width) / static_cast<float>(height), 1.0f, 5000.0f);
     XMStoreFloat4x4(&m_view, XMMatrixTranspose(view));
@@ -48,6 +48,99 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     m_renderer.CreateBuffer(nullptr, sizeof(LightVolumeConstants), &m_lightVolCB);
 
     return true;
+}
+
+void RenderingSystem::OnKeyDown(WPARAM key)
+{
+    if (key == 'W') m_moveForward = true;
+    if (key == 'S') m_moveBackward = true;
+    if (key == 'A') m_moveLeft = true;
+    if (key == 'D') m_moveRight = true;
+}
+
+void RenderingSystem::OnKeyUp(WPARAM key)
+{
+    if (key == 'W') m_moveForward = false;
+    if (key == 'S') m_moveBackward = false;
+    if (key == 'A') m_moveLeft = false;
+    if (key == 'D') m_moveRight = false;
+}
+
+void RenderingSystem::OnMouseDown(int x, int y)
+{
+    m_mouseLookActive = true;
+    m_hasLastMouse = true;
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+}
+
+void RenderingSystem::OnMouseUp()
+{
+    m_mouseLookActive = false;
+    m_hasLastMouse = false;
+}
+
+void RenderingSystem::OnMouseMove(int x, int y)
+{
+    if (!m_mouseLookActive)
+        return;
+
+    if (!m_hasLastMouse)
+    {
+        m_hasLastMouse = true;
+        m_lastMouseX = x;
+        m_lastMouseY = y;
+        return;
+    }
+
+    const int dx = x - m_lastMouseX;
+    const int dy = y - m_lastMouseY;
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+
+    m_yaw += static_cast<float>(dx) * m_mouseSensitivity;
+    m_pitch -= static_cast<float>(dy) * m_mouseSensitivity;
+
+    const float pitchLimit = XM_PIDIV2 - 0.01f;
+    if (m_pitch > pitchLimit) m_pitch = pitchLimit;
+    if (m_pitch < -pitchLimit) m_pitch = -pitchLimit;
+}
+
+void RenderingSystem::UpdateCamera(float dt)
+{
+    const float sinYaw = std::sin(m_yaw);
+    const float cosYaw = std::cos(m_yaw);
+    const float sinPitch = std::sin(m_pitch);
+    const float cosPitch = std::cos(m_pitch);
+
+    XMVECTOR forward = XMVector3Normalize(XMVectorSet(cosPitch * sinYaw, sinPitch, cosPitch * cosYaw, 0.0f));
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), forward));
+
+    XMVECTOR pos = XMLoadFloat3(&m_cameraPos);
+    const float step = m_moveSpeed * dt;
+    if (m_moveForward) pos = XMVectorAdd(pos, XMVectorScale(forward, step));
+    if (m_moveBackward) pos = XMVectorSubtract(pos, XMVectorScale(forward, step));
+    if (m_moveLeft) pos = XMVectorSubtract(pos, XMVectorScale(right, step));
+    if (m_moveRight) pos = XMVectorAdd(pos, XMVectorScale(right, step));
+
+    XMStoreFloat3(&m_cameraPos, pos);
+    UpdateViewMatrix();
+}
+
+void RenderingSystem::UpdateViewMatrix()
+{
+    const float sinYaw = std::sin(m_yaw);
+    const float cosYaw = std::cos(m_yaw);
+    const float sinPitch = std::sin(m_pitch);
+    const float cosPitch = std::cos(m_pitch);
+
+    const XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
+    const XMVECTOR forward = XMVector3Normalize(XMVectorSet(cosPitch * sinYaw, sinPitch, cosPitch * cosYaw, 0.0f));
+    const XMVECTOR at = XMVectorAdd(eye, forward);
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    XMMATRIX view = XMMatrixLookAtLH(eye, at, up);
+    XMStoreFloat4x4(&m_view, XMMatrixTranspose(view));
 }
 
 void RenderingSystem::BeginFrame(const float clearColor[4])
@@ -385,7 +478,7 @@ void RenderingSystem::GeometryPass()
 void RenderingSystem::UpdateFrameConstants()
 {
     LightingFrameConstants cb{};
-    cb.EyePos = XMFLOAT4(m_eyePos.x, m_eyePos.y, m_eyePos.z, 1.0f);
+    cb.EyePos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
     cb.ScreenSize = XMFLOAT2(static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()));
     cb.InvScreenSize = XMFLOAT2(1.0f / cb.ScreenSize.x, 1.0f / cb.ScreenSize.y);
     cb.AmbientColor = XMFLOAT4(0.08f, 0.08f, 0.10f, 1.0f);
@@ -516,7 +609,7 @@ void RenderingSystem::LightingPassSpot()
 void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 {
     (void)totalTime;
-    (void)deltaTime;
+    UpdateCamera(deltaTime);
 
     auto cmdList = m_renderer.GetCmdList();
 

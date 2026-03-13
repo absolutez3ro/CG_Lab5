@@ -84,11 +84,26 @@ public:
 
                 switch (msg.message)
                 {
-                case WM_KEYDOWN: m_input.OnKeyDown(msg.wParam); break;
-                case WM_KEYUP: m_input.OnKeyUp(msg.wParam); break;
-                case WM_MOUSEMOVE: m_input.OnMouseMove(LOWORD(msg.lParam), HIWORD(msg.lParam)); break;
-                case WM_LBUTTONDOWN: m_input.OnMouseDown(0); break;
-                case WM_LBUTTONUP: m_input.OnMouseUp(0); break;
+                case WM_KEYDOWN:
+                    m_input.OnKeyDown(msg.wParam);
+                    m_renderer.OnKeyDown(msg.wParam);
+                    break;
+                case WM_KEYUP:
+                    m_input.OnKeyUp(msg.wParam);
+                    m_renderer.OnKeyUp(msg.wParam);
+                    break;
+                case WM_MOUSEMOVE:
+                    m_input.OnMouseMove(LOWORD(msg.lParam), HIWORD(msg.lParam));
+                    m_renderer.OnMouseMove(LOWORD(msg.lParam), HIWORD(msg.lParam));
+                    break;
+                case WM_LBUTTONDOWN:
+                    m_input.OnMouseDown(0);
+                    m_renderer.OnMouseDown(LOWORD(msg.lParam), HIWORD(msg.lParam));
+                    break;
+                case WM_LBUTTONUP:
+                    m_input.OnMouseUp(0);
+                    m_renderer.OnMouseUp();
+                    break;
                 case WM_RBUTTONDOWN: m_input.OnMouseDown(1); break;
                 case WM_RBUTTONUP: m_input.OnMouseUp(1); break;
                 }
