@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <cstdint>
+#include <algorithm>
 
 using namespace DirectX;
 
@@ -428,7 +429,7 @@ void RenderingSystem::UpdateSpotLightCB(const SpotLight& light)
     LightVolumeConstants cb{};
     XMStoreFloat4x4(&cb.WorldViewProj, XMMatrixTranspose(world * view * proj));
     cb.PositionRange = XMFLOAT4(light.Position.x, light.Position.y, light.Position.z, light.Range);
-    const float clampedCos = std::max(0.0f, std::min(light.CosAngle, 0.999f));
+    const float clampedCos = std::clamp(light.CosAngle, 0.0f, 0.999f);
     cb.DirectionCos = XMFLOAT4(normDir.x, normDir.y, normDir.z, clampedCos);
     cb.ColorIntensity = XMFLOAT4(light.Color.x, light.Color.y, light.Color.z, light.Intensity);
 
