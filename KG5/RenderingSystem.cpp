@@ -47,6 +47,8 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     m_renderer.CreateBuffer(nullptr, sizeof(LightingFrameConstants), &m_frameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightVolumeConstants), &m_lightVolCB);
 
+    m_initialized = true;
+
     return true;
 }
 
@@ -628,6 +630,15 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
 void RenderingSystem::OnResize(int width, int height)
 {
+    if (!m_initialized)
+        return;
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    if (m_renderer.GetSrvHeap() == nullptr)
+        return;
+
     m_renderer.OnResize(width, height);
     m_gbuffer.Resize(
         m_renderer.GetDevice(),

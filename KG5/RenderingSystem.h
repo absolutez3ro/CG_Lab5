@@ -41,6 +41,8 @@ public:
     void OnMouseMove(int x, int y);
 
 private:
+    bool m_initialized = false;
+
     struct PointLight
     {
         XMFLOAT3 Position;
