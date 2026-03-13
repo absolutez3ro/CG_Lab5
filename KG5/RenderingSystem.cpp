@@ -172,10 +172,6 @@ void RenderingSystem::CreatePSOs()
     dirDesc.PS = { dirPS->GetBufferPointer(), dirPS->GetBufferSize() };
     dirDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     dirDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    dirDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    dirDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-    dirDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
-    dirDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
     dirDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     dirDesc.DepthStencilState.DepthEnable = FALSE;
     dirDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
