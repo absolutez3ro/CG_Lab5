@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 #include <string>
 #include <vector>
+#include <stdexcept>
 #include "d3dx12.h"
 #include "ObjLoader.h"
 #include "TextureLoader.h"
@@ -73,9 +74,13 @@ public:
         return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), 2, m_rtvDescSize);
     }
     D3D12_CPU_DESCRIPTOR_HANDLE GetGbufferSrvCpuStart() {
+        if (!m_cbvSrvHeap)
+            throw std::runtime_error("Renderer::GetGbufferSrvCpuStart called before SRV heap initialization");
         return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
     D3D12_GPU_DESCRIPTOR_HANDLE GetGbufferSrvGpuStart() {
+        if (!m_cbvSrvHeap)
+            throw std::runtime_error("Renderer::GetGbufferSrvGpuStart called before SRV heap initialization");
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
 

@@ -40,14 +40,14 @@ public:
         if (!m_window.Init(hInstance, 1280, 720, L"Sponza Deferred Renderer"))
             return false;
 
-        m_window.SetResizeCallback([this](int w, int h) {
-            m_renderer.OnResize(w, h);
-            });
-
         if (!m_renderer.Init(m_window.GetHWND(),
             m_window.GetWidth(),
             m_window.GetHeight()))
             return false;
+
+        m_window.SetResizeCallback([this](int w, int h) {
+            m_renderer.OnResize(w, h);
+            });
 
         m_renderer.SetTexTiling(1.0f, 1.0f);
         m_renderer.SetTexScroll(0.0f, 0.0f);
