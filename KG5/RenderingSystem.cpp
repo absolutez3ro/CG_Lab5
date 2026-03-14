@@ -297,6 +297,7 @@ void RenderingSystem::CreatePSOs()
         desc.VS = { m_lightVS->GetBufferPointer(), m_lightVS->GetBufferSize() };
         desc.PS = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
         desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         desc.BlendState.RenderTarget[0].BlendEnable = TRUE;
         desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
