@@ -112,12 +112,10 @@ void GBuffer::Clear(ID3D12GraphicsCommandList* cmdList) const
 {
     static const float zero[4] = { 0.f, 0.f, 0.f, 0.f };
     static const float normalClear[4] = { 0.5f, 0.5f, 1.0f, 1.0f };
-    static const float posClear[4] = { 0.f, 0.f, 0.f, 1.0f };
     static const float materialClear[4] = { 0.f, 0.f, 0.f, 32.0f / 255.0f };
 
     cmdList->ClearRenderTargetView(m_rtvHandles[Albedo], zero, 0, nullptr);
     cmdList->ClearRenderTargetView(m_rtvHandles[Normal], normalClear, 0, nullptr);
-    cmdList->ClearRenderTargetView(m_rtvHandles[Position], posClear, 0, nullptr);
     cmdList->ClearRenderTargetView(m_rtvHandles[Material], materialClear, 0, nullptr);
 }
 

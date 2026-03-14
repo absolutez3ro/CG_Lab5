@@ -84,12 +84,24 @@ public:
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
 
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDepthSrvCpuHandle() const {
+        if (!m_cbvSrvHeap)
+            return D3D12_CPU_DESCRIPTOR_HANDLE{};
+        return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE GetDepthSrvGpuHandle() const {
+        if (!m_cbvSrvHeap)
+            return D3D12_GPU_DESCRIPTOR_HANDLE{};
+        return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+    }
+
     const D3D12_VERTEX_BUFFER_VIEW* GetVbView() const { return &m_vbView; }
     const D3D12_INDEX_BUFFER_VIEW* GetIbView() const { return &m_ibView; }
     const std::vector<MeshSubset>& GetSubsets() const { return m_subsets; }
     const std::vector<GpuMaterial>& GetMaterials() const { return m_gpuMaterials; }
 
     void CreateBuffer(const void* data, UINT size, ID3D12Resource** resource);
+    void TransitionDepthToShaderResource();
 
 private:
     void CreateDevice();
@@ -118,6 +130,7 @@ private:
 
     ComPtr<ID3D12Resource> m_renderTargets[2];
     ComPtr<ID3D12Resource> m_depthStencil;
+    D3D12_RESOURCE_STATES m_depthState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[2] = { 0, 0 };
     HANDLE m_fenceEvent = nullptr;

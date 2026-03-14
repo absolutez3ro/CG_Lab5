@@ -11,6 +11,7 @@ struct alignas(256) LightingFrameConstants
     XMFLOAT4 AmbientColor;
     XMFLOAT4 DirLightDirection;
     XMFLOAT4 DirLightColorIntensity;
+    XMFLOAT4X4 InvViewProj;
 };
 
 struct alignas(256) LightVolumeConstants

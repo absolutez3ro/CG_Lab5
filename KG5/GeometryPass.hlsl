@@ -33,8 +33,7 @@ struct PSOutput
 {
     float4 Albedo   : SV_Target0;
     float4 Normal   : SV_Target1;
-    float4 Position : SV_Target2;
-    float4 Material : SV_Target3;
+    float4 Material : SV_Target2;
 };
 
 VSOutput VSMain(VSInput vin)
@@ -56,7 +55,6 @@ PSOutput PSMain(VSOutput pin)
 
     o.Albedo = albedo;
     o.Normal = float4(n * 0.5f + 0.5f, 1.0f);
-    o.Position = float4(pin.PositionW, 1.0f);
     o.Material = float4(gMaterialSpecular.rgb, saturate(gSpecularPower / 255.0f));
     return o;
 }

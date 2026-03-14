@@ -253,11 +253,10 @@ void RenderingSystem::CreatePSOs()
     geoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     geoDesc.SampleMask = UINT_MAX;
     geoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    geoDesc.NumRenderTargets = 4;
+    geoDesc.NumRenderTargets = 3;
     geoDesc.RTVFormats[0] = m_gbuffer.GetFormat(GBuffer::Albedo);
     geoDesc.RTVFormats[1] = m_gbuffer.GetFormat(GBuffer::Normal);
-    geoDesc.RTVFormats[2] = m_gbuffer.GetFormat(GBuffer::Position);
-    geoDesc.RTVFormats[3] = m_gbuffer.GetFormat(GBuffer::Material);
+    geoDesc.RTVFormats[2] = m_gbuffer.GetFormat(GBuffer::Material);
     geoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     geoDesc.SampleDesc.Count = 1;
 
@@ -425,16 +424,15 @@ void RenderingSystem::GeometryPass()
 {
     auto cmdList = m_renderer.GetCmdList();
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] =
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] =
     {
         m_gbuffer.GetRTV(GBuffer::Albedo),
         m_gbuffer.GetRTV(GBuffer::Normal),
-        m_gbuffer.GetRTV(GBuffer::Position),
         m_gbuffer.GetRTV(GBuffer::Material),
     };
 
     auto dsv = m_renderer.GetDsvHandle();
-    cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+    cmdList->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     cmdList->SetGraphicsRootSignature(m_geometryRS.Get());
@@ -513,6 +511,11 @@ void RenderingSystem::UpdateFrameConstants()
 
     cb.DirLightDirection = XMFLOAT4(dirLightNormalized.x, dirLightNormalized.y, dirLightNormalized.z, 0.0f);
     cb.DirLightColorIntensity = XMFLOAT4(0.95f, 0.97f, 1.00f, 1.35f);
+
+    XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    XMStoreFloat4x4(&cb.InvViewProj, XMMatrixTranspose(invViewProj));
 
     void* mapped = nullptr;
     m_frameCB->Map(0, nullptr, &mapped);
@@ -650,6 +653,7 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
     GeometryPass();
 
+    m_renderer.TransitionDepthToShaderResource();
     m_gbuffer.TransitionToShaderResource(cmdList);
 
     UpdateFrameConstants();

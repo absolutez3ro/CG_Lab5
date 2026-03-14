@@ -1,8 +1,8 @@
 // Albedo from GBuffer (written in geometry pass)
 Texture2D gAlbedoTex   : register(t0);
 Texture2D gNormalTex   : register(t1);
-Texture2D gPositionTex : register(t2);
-Texture2D gMaterialTex : register(t3);
+Texture2D gMaterialTex : register(t2);
+Texture2D gDepthTex    : register(t3);
 SamplerState gSampler  : register(s0);
 
 cbuffer LightingFrameCB : register(b0)
@@ -13,6 +13,7 @@ cbuffer LightingFrameCB : register(b0)
     float4 gAmbientColor;
     float4 gDirLightDirection;
     float4 gDirLightColorIntensity;
+    float4x4 gInvViewProj;
 };
 
 cbuffer LightVolumeCB : register(b1)
@@ -79,6 +80,18 @@ float3 DecodeNormal(float3 n)
     return normalize(n * 2.0f - 1.0f);
 }
 
+float3 ReconstructWorldPosition(float2 uv, float depth)
+{
+    float2 ndc;
+    ndc.x = uv.x * 2.0f - 1.0f;
+    ndc.y = (1.0f - uv.y) * 2.0f - 1.0f;
+
+    float4 clipPos = float4(ndc, depth, 1.0f);
+    float4 worldPos = mul(clipPos, gInvViewProj);
+
+    return worldPos.xyz / worldPos.w;
+}
+
 float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColor, float specPower, float3 L, float3 lightCol, float atten)
 {
     float3 H = normalize(L + V);
@@ -94,7 +107,8 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     float3 normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
-    float3 posW = gPositionTex.Sample(gSampler, uv).xyz;
+    float depth = gDepthTex.Sample(gSampler, uv).r;
+    float3 posW = ReconstructWorldPosition(uv, depth);
     float4 mat = gMaterialTex.Sample(gSampler, uv);
     float3 specColor = mat.rgb;
     float specPower = saturate(mat.a) * 255.0f;
@@ -114,7 +128,8 @@ float4 PSPoint(VSOutput pin) : SV_Target
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
         discard;
 
-    float3 P = gPositionTex.Sample(gSampler, uv).xyz;
+    float depth = gDepthTex.Sample(gSampler, uv).r;
+    float3 P = ReconstructWorldPosition(uv, depth);
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     float4 mat = gMaterialTex.Sample(gSampler, uv);
@@ -144,7 +159,8 @@ float4 PSSpot(VSOutput pin) : SV_Target
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
         discard;
 
-    float3 P = gPositionTex.Sample(gSampler, uv).xyz;
+    float depth = gDepthTex.Sample(gSampler, uv).r;
+    float3 P = ReconstructWorldPosition(uv, depth);
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     float4 mat = gMaterialTex.Sample(gSampler, uv);

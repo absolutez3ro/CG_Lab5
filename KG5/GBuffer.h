@@ -11,13 +11,12 @@ using Microsoft::WRL::ComPtr;
 class GBuffer
 {
 public:
-    static constexpr UINT BufferCount = 4;
+    static constexpr UINT BufferCount = 3;
     enum Target : UINT
     {
         Albedo = 0,
         Normal = 1,
-        Position = 2,
-        Material = 3,
+        Material = 2,
     };
 
     bool Initialize(
@@ -64,7 +63,6 @@ private:
     ComPtr<ID3D12Resource> m_targets[BufferCount];
     DXGI_FORMAT m_formats[BufferCount] = {
         DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_FORMAT_R8G8B8A8_UNORM,
     };
