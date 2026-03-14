@@ -18,8 +18,6 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     if (!m_renderer.Init(hwnd, width, height))
         return false;
 
-    if (m_renderer.GetSrvHeap() == nullptr)
-        return false;
 
     m_gbuffer.Initialize(
         m_renderer.GetDevice(),
