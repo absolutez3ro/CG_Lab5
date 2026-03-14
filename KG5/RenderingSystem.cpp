@@ -18,6 +18,9 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     if (!m_renderer.Init(hwnd, width, height))
         return false;
 
+    if (m_renderer.GetSrvHeap() == nullptr)
+        return false;
+
     m_gbuffer.Initialize(
         m_renderer.GetDevice(),
         width,
@@ -410,8 +413,6 @@ void RenderingSystem::SetupSceneLights()
     setPointLight(5, PointLight{ XMFLOAT3(-220.f, 120.f, 560.f), 360.f, XMFLOAT3(0.35f, 0.95f, 1.00f), 1.45f });
     setPointLight(6, PointLight{ XMFLOAT3(240.f, 120.f, 560.f), 360.f, XMFLOAT3(1.00f, 0.88f, 0.35f), 1.45f });
     setPointLight(7, PointLight{ XMFLOAT3(0.f, 145.f, 700.f), 420.f, XMFLOAT3(1.00f, 0.95f, 0.80f), 1.55f });
-    setPointLight(8, PointLight{ XMFLOAT3(-520.f, 130.f, 520.f), 360.f, XMFLOAT3(0.80f, 0.55f, 1.00f), 1.30f });
-    setPointLight(9, PointLight{ XMFLOAT3(520.f, 130.f, 520.f), 360.f, XMFLOAT3(1.00f, 0.65f, 0.45f), 1.30f });
 
     setSpotLight(0, SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
     setSpotLight(1, SpotLight{ XMFLOAT3(300.f, 330.f, -40.f), 520.f, XMFLOAT3(-0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
