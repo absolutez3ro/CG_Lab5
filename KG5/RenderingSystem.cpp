@@ -387,17 +387,20 @@ void RenderingSystem::CreateLightMeshes()
 void RenderingSystem::SetupSceneLights()
 {
     m_pointLights = {
-        PointLight{ XMFLOAT3(-350.f, 140.f, -200.f), 300.f, XMFLOAT3(1.00f, 0.30f, 0.30f), 1.8f },
-        PointLight{ XMFLOAT3(350.f, 140.f, -200.f), 300.f, XMFLOAT3(0.30f, 0.40f, 1.00f), 1.8f },
-        PointLight{ XMFLOAT3(-350.f, 140.f, 200.f), 300.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 1.6f },
-        PointLight{ XMFLOAT3(350.f, 140.f, 200.f), 300.f, XMFLOAT3(1.00f, 0.85f, 0.30f), 1.6f },
-        PointLight{ XMFLOAT3(0.f, 200.f, 0.f), 350.f, XMFLOAT3(1.00f, 1.00f, 1.00f), 1.1f },
-        PointLight{ XMFLOAT3(0.f, 90.f, -380.f), 260.f, XMFLOAT3(0.80f, 0.60f, 1.00f), 1.4f },
+        PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 320.f, XMFLOAT3(1.00f, 0.30f, 0.30f), 1.8f },
+        PointLight{ XMFLOAT3(-140.f, 110.f, -320.f), 300.f, XMFLOAT3(1.00f, 0.70f, 0.25f), 1.5f },
+        PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 310.f, XMFLOAT3(0.25f, 0.55f, 1.00f), 1.7f },
+        PointLight{ XMFLOAT3(430.f, 120.f, -190.f), 300.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 1.6f },
+        PointLight{ XMFLOAT3(-390.f, 140.f, 180.f), 320.f, XMFLOAT3(0.95f, 0.40f, 1.00f), 1.6f },
+        PointLight{ XMFLOAT3(-80.f, 100.f, 290.f), 280.f, XMFLOAT3(0.30f, 0.95f, 0.90f), 1.4f },
+        PointLight{ XMFLOAT3(250.f, 130.f, 250.f), 300.f, XMFLOAT3(1.00f, 0.85f, 0.30f), 1.6f },
+        PointLight{ XMFLOAT3(460.f, 115.f, 120.f), 300.f, XMFLOAT3(0.85f, 0.85f, 1.00f), 1.5f },
     };
 
     m_spotLights = {
-        SpotLight{ XMFLOAT3(0.f, 360.f, -160.f), 500.f, XMFLOAT3(0.f, -1.f, 0.2f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.8f },
-        SpotLight{ XMFLOAT3(-180.f, 300.f, 260.f), 420.f, XMFLOAT3(0.25f, -1.f, -0.2f), 0.86f, XMFLOAT3(0.7f, 0.8f, 1.0f), 2.2f },
+        SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.6f },
+        SpotLight{ XMFLOAT3(40.f, 350.f, -280.f), 500.f, XMFLOAT3(-0.08f, -1.f, 0.35f), 0.85f, XMFLOAT3(0.7f, 0.8f, 1.0f), 2.3f },
+        SpotLight{ XMFLOAT3(300.f, 320.f, 220.f), 500.f, XMFLOAT3(-0.25f, -1.f, -0.20f), 0.86f, XMFLOAT3(1.0f, 0.80f, 0.65f), 2.4f },
     };
 }
 

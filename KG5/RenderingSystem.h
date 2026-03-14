@@ -127,6 +127,6 @@ private:
     int m_lastMouseX = 0;
     int m_lastMouseY = 0;
 
-    std::array<PointLight, 6> m_pointLights{};
-    std::array<SpotLight, 2> m_spotLights{};
+    std::array<PointLight, 8> m_pointLights{};
+    std::array<SpotLight, 3> m_spotLights{};
 };
