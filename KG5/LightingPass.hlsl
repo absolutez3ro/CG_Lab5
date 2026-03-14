@@ -100,7 +100,7 @@ float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColo
     return (albedo * diff + specColor * spec) * lightCol * atten;
 }
 
-// Directional lighting shader (reads albedo/normal/position/material)
+// Directional lighting shader (reconstructs world position from depth)
 float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 {
     float2 uv = saturate(pin.UV);

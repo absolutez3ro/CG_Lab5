@@ -89,12 +89,6 @@ public:
             return D3D12_CPU_DESCRIPTOR_HANDLE{};
         return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
     }
-    D3D12_GPU_DESCRIPTOR_HANDLE GetDepthSrvGpuHandle() const {
-        if (!m_cbvSrvHeap)
-            return D3D12_GPU_DESCRIPTOR_HANDLE{};
-        return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
-    }
-
     const D3D12_VERTEX_BUFFER_VIEW* GetVbView() const { return &m_vbView; }
     const D3D12_INDEX_BUFFER_VIEW* GetIbView() const { return &m_ibView; }
     const std::vector<MeshSubset>& GetSubsets() const { return m_subsets; }
