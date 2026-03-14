@@ -41,9 +41,23 @@ struct VSFullscreenOutput
 VSFullscreenOutput VSFullscreen(uint vertexID : SV_VertexID)
 {
     VSFullscreenOutput o;
-    float2 pos = float2((vertexID << 1) & 2, vertexID & 2);
-    o.UV = pos * 0.5f;
-    o.PositionH = float4(pos * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+
+    const float2 positions[3] =
+    {
+        float2(-1.0f, -1.0f),
+        float2(-1.0f, 3.0f),
+        float2(3.0f, -1.0f)
+    };
+
+    const float2 texcoords[3] =
+    {
+        float2(0.0f, 1.0f),
+        float2(0.0f, -1.0f),
+        float2(2.0f, 1.0f)
+    };
+
+    o.PositionH = float4(positions[vertexID], 0.0f, 1.0f);
+    o.UV = texcoords[vertexID];
     return o;
 }
 
@@ -74,7 +88,7 @@ float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColo
 
 float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 {
-    float2 uv = pin.UV;
+    float2 uv = saturate(pin.UV);
 
     float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     float3 normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);

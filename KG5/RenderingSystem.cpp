@@ -204,7 +204,7 @@ void RenderingSystem::CreateRootSignatures()
 
         CD3DX12_STATIC_SAMPLER_DESC sampler(
             0,
-            D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            D3D12_FILTER_MIN_MAG_MIP_POINT,
             D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
             D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
             D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
