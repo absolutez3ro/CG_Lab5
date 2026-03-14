@@ -412,7 +412,7 @@ void RenderingSystem::SetupSceneLights()
     setPointLight(7, PointLight{ XMFLOAT3(460.f, 115.f, 120.f), 300.f, XMFLOAT3(0.85f, 0.85f, 1.00f), 1.5f });
 
     setSpotLight(0, SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.6f });
-    setSpotLight(1, SpotLight{ XMFLOAT3(40.f, 350.f, -280.f), 500.f, XMFLOAT3(-0.08f, -1.f, 0.35f), 0.85f, XMFLOAT3(0.7f, 0.8f, 1.0f), 2.3f });
+    setSpotLight(1, SpotLight{ XMFLOAT3(300.f, 330.f, -40.f), 520.f, XMFLOAT3(-0.25f, -1.f, 0.18f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.6f });
     setSpotLight(2, SpotLight{ XMFLOAT3(300.f, 320.f, 220.f), 500.f, XMFLOAT3(-0.25f, -1.f, -0.20f), 0.86f, XMFLOAT3(1.0f, 0.80f, 0.65f), 2.4f });
 }
 
