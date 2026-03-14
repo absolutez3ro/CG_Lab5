@@ -387,23 +387,35 @@ void RenderingSystem::CreateLightMeshes()
 
 void RenderingSystem::SetupSceneLights()
 {
-    m_pointLights = {
-        PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 320.f, XMFLOAT3(1.00f, 0.30f, 0.30f), 1.8f },
-        PointLight{ XMFLOAT3(-140.f, 110.f, -320.f), 300.f, XMFLOAT3(1.00f, 0.70f, 0.25f), 1.5f },
-        PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 310.f, XMFLOAT3(0.25f, 0.55f, 1.00f), 1.7f },
-        PointLight{ XMFLOAT3(430.f, 120.f, -190.f), 300.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 1.6f },
-        PointLight{ XMFLOAT3(-390.f, 140.f, 180.f), 320.f, XMFLOAT3(0.95f, 0.40f, 1.00f), 1.6f },
-        PointLight{ XMFLOAT3(-80.f, 100.f, 290.f), 280.f, XMFLOAT3(0.30f, 0.95f, 0.90f), 1.4f },
-        PointLight{ XMFLOAT3(250.f, 130.f, 250.f), 300.f, XMFLOAT3(1.00f, 0.85f, 0.30f), 1.6f },
-        PointLight{ XMFLOAT3(460.f, 115.f, 120.f), 300.f, XMFLOAT3(0.85f, 0.85f, 1.00f), 1.5f },
+    m_pointLights.fill(PointLight{});
+    m_spotLights.fill(SpotLight{});
+
+    auto setPointLight = [this](size_t index, const PointLight& light)
+    {
+        if (index < m_pointLights.size())
+            m_pointLights[index] = light;
     };
 
-    m_spotLights = {
-        SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.6f },
-        SpotLight{ XMFLOAT3(40.f, 350.f, -280.f), 500.f, XMFLOAT3(-0.08f, -1.f, 0.35f), 0.85f, XMFLOAT3(0.7f, 0.8f, 1.0f), 2.3f },
-        SpotLight{ XMFLOAT3(300.f, 320.f, 220.f), 500.f, XMFLOAT3(-0.25f, -1.f, -0.20f), 0.86f, XMFLOAT3(1.0f, 0.80f, 0.65f), 2.4f },
+    auto setSpotLight = [this](size_t index, const SpotLight& light)
+    {
+        if (index < m_spotLights.size())
+            m_spotLights[index] = light;
     };
+
+    setPointLight(0, PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 320.f, XMFLOAT3(1.00f, 0.30f, 0.30f), 1.8f });
+    setPointLight(1, PointLight{ XMFLOAT3(-140.f, 110.f, -320.f), 300.f, XMFLOAT3(1.00f, 0.70f, 0.25f), 1.5f });
+    setPointLight(2, PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 310.f, XMFLOAT3(0.25f, 0.55f, 1.00f), 1.7f });
+    setPointLight(3, PointLight{ XMFLOAT3(430.f, 120.f, -190.f), 300.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 1.6f });
+    setPointLight(4, PointLight{ XMFLOAT3(-390.f, 140.f, 180.f), 320.f, XMFLOAT3(0.95f, 0.40f, 1.00f), 1.6f });
+    setPointLight(5, PointLight{ XMFLOAT3(-80.f, 100.f, 290.f), 280.f, XMFLOAT3(0.30f, 0.95f, 0.90f), 1.4f });
+    setPointLight(6, PointLight{ XMFLOAT3(250.f, 130.f, 250.f), 300.f, XMFLOAT3(1.00f, 0.85f, 0.30f), 1.6f });
+    setPointLight(7, PointLight{ XMFLOAT3(460.f, 115.f, 120.f), 300.f, XMFLOAT3(0.85f, 0.85f, 1.00f), 1.5f });
+
+    setSpotLight(0, SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.84f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.6f });
+    setSpotLight(1, SpotLight{ XMFLOAT3(40.f, 350.f, -280.f), 500.f, XMFLOAT3(-0.08f, -1.f, 0.35f), 0.85f, XMFLOAT3(0.7f, 0.8f, 1.0f), 2.3f });
+    setSpotLight(2, SpotLight{ XMFLOAT3(300.f, 320.f, 220.f), 500.f, XMFLOAT3(-0.25f, -1.f, -0.20f), 0.86f, XMFLOAT3(1.0f, 0.80f, 0.65f), 2.4f });
 }
+
 
 void RenderingSystem::GeometryPass()
 {
