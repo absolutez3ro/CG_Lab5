@@ -75,12 +75,12 @@ public:
     }
     D3D12_CPU_DESCRIPTOR_HANDLE GetGbufferSrvCpuStart() {
         if (!m_cbvSrvHeap)
-            throw std::runtime_error("Renderer::GetGbufferSrvCpuStart called before SRV heap initialization");
+            return D3D12_CPU_DESCRIPTOR_HANDLE{};
         return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
     D3D12_GPU_DESCRIPTOR_HANDLE GetGbufferSrvGpuStart() {
         if (!m_cbvSrvHeap)
-            throw std::runtime_error("Renderer::GetGbufferSrvGpuStart called before SRV heap initialization");
+            return D3D12_GPU_DESCRIPTOR_HANDLE{};
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
 
