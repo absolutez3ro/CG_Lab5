@@ -1,3 +1,4 @@
+// Albedo from GBuffer (written in geometry pass)
 Texture2D gAlbedoTex   : register(t0);
 Texture2D gNormalTex   : register(t1);
 Texture2D gPositionTex : register(t2);
@@ -86,6 +87,7 @@ float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColo
     return (albedo * diff + specColor * spec) * lightCol * atten;
 }
 
+// Directional lighting shader (reads albedo/normal/position/material)
 float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 {
     float2 uv = saturate(pin.UV);
@@ -105,6 +107,7 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
     return float4(color, 1.0f);
 }
 
+// Point-light shader (reads albedo from gAlbedoTex)
 float4 PSPoint(VSOutput pin) : SV_Target
 {
     float2 uv = GetUV(pin.PositionH);
@@ -134,6 +137,7 @@ float4 PSPoint(VSOutput pin) : SV_Target
     return float4(result, 1.0f);
 }
 
+// Spot-light shader (reads albedo from gAlbedoTex)
 float4 PSSpot(VSOutput pin) : SV_Target
 {
     float2 uv = GetUV(pin.PositionH);

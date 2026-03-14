@@ -386,6 +386,7 @@ void RenderingSystem::CreateLightMeshes()
     m_sphereIndexCount = static_cast<UINT>(indices.size());
 }
 
+// === Light setup block (Point + Spot lights) ===
 void RenderingSystem::SetupSceneLights()
 {
     m_pointLights.fill(PointLight{});
@@ -497,6 +498,7 @@ void RenderingSystem::GeometryPass()
     m_objectCB->Unmap(0, nullptr);
 }
 
+// === Directional light block (frame constants for PSDirectional) ===
 void RenderingSystem::UpdateFrameConstants()
 {
     LightingFrameConstants cb{};
@@ -559,6 +561,7 @@ void RenderingSystem::UpdateSpotLightCB(const SpotLight& light)
     m_lightVolCB->Unmap(0, nullptr);
 }
 
+// === Directional light pass ===
 void RenderingSystem::LightingPassDirectional()
 {
     auto cmdList = m_renderer.GetCmdList();
@@ -579,6 +582,7 @@ void RenderingSystem::LightingPassDirectional()
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
+// === Point lights pass ===
 void RenderingSystem::LightingPassPoint()
 {
     auto cmdList = m_renderer.GetCmdList();
@@ -606,6 +610,7 @@ void RenderingSystem::LightingPassPoint()
     }
 }
 
+// === Spot lights pass ===
 void RenderingSystem::LightingPassSpot()
 {
     auto cmdList = m_renderer.GetCmdList();
