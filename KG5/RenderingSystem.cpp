@@ -116,14 +116,15 @@ void RenderingSystem::UpdateCamera(float dt)
     const float cosPitch = std::cos(m_pitch);
 
     XMVECTOR forward = XMVector3Normalize(XMVectorSet(cosPitch * sinYaw, sinPitch, cosPitch * cosYaw, 0.0f));
-    XMVECTOR right = XMVector3Normalize(XMVector3Cross(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), forward));
+    XMVECTOR forwardXZ = XMVector3Normalize(XMVectorSet(sinYaw, 0.0f, cosYaw, 0.0f));
+    XMVECTOR rightXZ = XMVector3Normalize(XMVectorSet(cosYaw, 0.0f, -sinYaw, 0.0f));
 
     XMVECTOR pos = XMLoadFloat3(&m_cameraPos);
     const float step = m_moveSpeed * dt;
-    if (m_moveForward) pos = XMVectorAdd(pos, XMVectorScale(forward, step));
-    if (m_moveBackward) pos = XMVectorSubtract(pos, XMVectorScale(forward, step));
-    if (m_moveLeft) pos = XMVectorSubtract(pos, XMVectorScale(right, step));
-    if (m_moveRight) pos = XMVectorAdd(pos, XMVectorScale(right, step));
+    if (m_moveForward) pos = XMVectorAdd(pos, XMVectorScale(forwardXZ, step));
+    if (m_moveBackward) pos = XMVectorSubtract(pos, XMVectorScale(forwardXZ, step));
+    if (m_moveLeft) pos = XMVectorSubtract(pos, XMVectorScale(rightXZ, step));
+    if (m_moveRight) pos = XMVectorAdd(pos, XMVectorScale(rightXZ, step));
 
     XMStoreFloat3(&m_cameraPos, pos);
     UpdateViewMatrix();

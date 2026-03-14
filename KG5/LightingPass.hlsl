@@ -93,7 +93,9 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 
 float4 PSPoint(VSOutput pin) : SV_Target
 {
-    float2 uv = saturate(GetUV(pin.PositionH));
+    float2 uv = GetUV(pin.PositionH);
+    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
+        discard;
 
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
@@ -120,7 +122,9 @@ float4 PSPoint(VSOutput pin) : SV_Target
 
 float4 PSSpot(VSOutput pin) : SV_Target
 {
-    float2 uv = saturate(GetUV(pin.PositionH));
+    float2 uv = GetUV(pin.PositionH);
+    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
+        discard;
 
     float3 P = gPositionTex.Sample(gSampler, uv).xyz;
     float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);

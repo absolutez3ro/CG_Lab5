@@ -2,6 +2,7 @@
 #include "RenderingSystem.h"
 #include "Timer.h"
 #include "InputDevice.h"
+#include <windowsx.h>
 
 #include <string>
 
@@ -93,12 +94,12 @@ public:
                     m_renderer.OnKeyUp(msg.wParam);
                     break;
                 case WM_MOUSEMOVE:
-                    m_input.OnMouseMove(LOWORD(msg.lParam), HIWORD(msg.lParam));
-                    m_renderer.OnMouseMove(LOWORD(msg.lParam), HIWORD(msg.lParam));
+                    m_input.OnMouseMove(GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam));
+                    m_renderer.OnMouseMove(GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam));
                     break;
                 case WM_LBUTTONDOWN:
                     m_input.OnMouseDown(0);
-                    m_renderer.OnMouseDown(LOWORD(msg.lParam), HIWORD(msg.lParam));
+                    m_renderer.OnMouseDown(GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam));
                     break;
                 case WM_LBUTTONUP:
                     m_input.OnMouseUp(0);
