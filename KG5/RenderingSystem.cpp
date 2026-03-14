@@ -410,6 +410,8 @@ void RenderingSystem::SetupSceneLights()
     setPointLight(5, PointLight{ XMFLOAT3(-220.f, 120.f, 560.f), 360.f, XMFLOAT3(0.35f, 0.95f, 1.00f), 1.45f });
     setPointLight(6, PointLight{ XMFLOAT3(240.f, 120.f, 560.f), 360.f, XMFLOAT3(1.00f, 0.88f, 0.35f), 1.45f });
     setPointLight(7, PointLight{ XMFLOAT3(0.f, 145.f, 700.f), 420.f, XMFLOAT3(1.00f, 0.95f, 0.80f), 1.55f });
+    setPointLight(8, PointLight{ XMFLOAT3(-520.f, 130.f, 520.f), 360.f, XMFLOAT3(0.80f, 0.55f, 1.00f), 1.30f });
+    setPointLight(9, PointLight{ XMFLOAT3(520.f, 130.f, 520.f), 360.f, XMFLOAT3(1.00f, 0.65f, 0.45f), 1.30f });
 
     setSpotLight(0, SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
     setSpotLight(1, SpotLight{ XMFLOAT3(300.f, 330.f, -40.f), 520.f, XMFLOAT3(-0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
@@ -501,7 +503,12 @@ void RenderingSystem::UpdateFrameConstants()
     cb.ScreenSize = XMFLOAT2(static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()));
     cb.InvScreenSize = XMFLOAT2(1.0f / cb.ScreenSize.x, 1.0f / cb.ScreenSize.y);
     cb.AmbientColor = XMFLOAT4(0.10f, 0.10f, 0.12f, 1.0f);
-    cb.DirLightDirection = XMFLOAT4(0.35f, -1.0f, 0.20f, 0.0f);
+
+    const XMVECTOR dirLight = XMVector3Normalize(XMVectorSet(0.35f, -1.0f, 0.20f, 0.0f));
+    XMFLOAT3 dirLightNormalized;
+    XMStoreFloat3(&dirLightNormalized, dirLight);
+
+    cb.DirLightDirection = XMFLOAT4(dirLightNormalized.x, dirLightNormalized.y, dirLightNormalized.z, 0.0f);
     cb.DirLightColorIntensity = XMFLOAT4(0.70f, 0.76f, 0.88f, 0.45f);
 
     void* mapped = nullptr;
