@@ -403,18 +403,20 @@ void RenderingSystem::SetupSceneLights()
             m_spotLights[index] = light;
     };
 
-    setPointLight(0, PointLight{ XMFLOAT3(-900.f, 140.f, -820.f), 620.f, XMFLOAT3(1.00f, 0.20f, 0.20f), 2.40f });
-    setPointLight(1, PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 500.f, XMFLOAT3(1.00f, 0.55f, 0.10f), 2.20f });
-    setPointLight(2, PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 500.f, XMFLOAT3(0.15f, 0.45f, 1.00f), 2.20f });
-    setPointLight(3, PointLight{ XMFLOAT3(760.f, 140.f, -760.f), 620.f, XMFLOAT3(0.20f, 1.00f, 0.35f), 2.40f });
-    setPointLight(4, PointLight{ XMFLOAT3(-760.f, 155.f, 180.f), 620.f, XMFLOAT3(0.90f, 0.25f, 1.00f), 2.30f });
-    setPointLight(5, PointLight{ XMFLOAT3(-260.f, 130.f, 620.f), 560.f, XMFLOAT3(0.20f, 0.95f, 1.00f), 2.25f });
-    setPointLight(6, PointLight{ XMFLOAT3(300.f, 130.f, 620.f), 560.f, XMFLOAT3(1.00f, 0.95f, 0.20f), 2.25f });
-    setPointLight(7, PointLight{ XMFLOAT3(900.f, 150.f, 860.f), 700.f, XMFLOAT3(1.00f, 0.98f, 0.85f), 2.60f });
+    // Point lights: distributed through central and side aisles with distinct colors.
+    setPointLight(0, PointLight{ XMFLOAT3(-520.f, 130.f, -420.f), 520.f, XMFLOAT3(1.00f, 0.25f, 0.20f), 2.60f }); // red
+    setPointLight(1, PointLight{ XMFLOAT3(520.f, 130.f, -420.f), 520.f, XMFLOAT3(0.20f, 0.55f, 1.00f), 2.60f });  // blue
+    setPointLight(2, PointLight{ XMFLOAT3(-360.f, 135.f, 80.f), 500.f, XMFLOAT3(1.00f, 0.70f, 0.20f), 2.50f });   // amber
+    setPointLight(3, PointLight{ XMFLOAT3(360.f, 135.f, 80.f), 500.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 2.50f });    // green
+    setPointLight(4, PointLight{ XMFLOAT3(-260.f, 140.f, 620.f), 560.f, XMFLOAT3(0.95f, 0.30f, 1.00f), 2.70f });  // magenta
+    setPointLight(5, PointLight{ XMFLOAT3(260.f, 140.f, 620.f), 560.f, XMFLOAT3(0.20f, 0.95f, 1.00f), 2.70f });   // cyan
+    setPointLight(6, PointLight{ XMFLOAT3(0.f, 145.f, 360.f), 600.f, XMFLOAT3(1.00f, 0.95f, 0.35f), 2.90f });     // yellow (center)
+    setPointLight(7, PointLight{ XMFLOAT3(0.f, 150.f, -120.f), 560.f, XMFLOAT3(1.00f, 0.85f, 0.80f), 2.70f });    // warm white (center)
 
-    setSpotLight(0, SpotLight{ XMFLOAT3(-760.f, 420.f, -120.f), 900.f, XMFLOAT3(0.35f, -1.f, 0.18f), 0.78f, XMFLOAT3(1.00f, 0.25f, 0.25f), 3.00f });
-    setSpotLight(1, SpotLight{ XMFLOAT3(760.f, 420.f, -120.f), 900.f, XMFLOAT3(-0.35f, -1.f, 0.18f), 0.78f, XMFLOAT3(0.25f, 0.55f, 1.00f), 3.00f });
-    setSpotLight(2, SpotLight{ XMFLOAT3(0.f, 460.f, 980.f), 1050.f, XMFLOAT3(0.0f, -1.f, -0.30f), 0.76f, XMFLOAT3(0.35f, 1.00f, 0.45f), 3.20f });
+    // Spot lights: separated positions and strongly distinct colors.
+    setSpotLight(0, SpotLight{ XMFLOAT3(-680.f, 430.f, -120.f), 980.f, XMFLOAT3(0.35f, -1.f, 0.18f), 0.77f, XMFLOAT3(1.00f, 0.20f, 0.20f), 3.30f }); // red spot
+    setSpotLight(1, SpotLight{ XMFLOAT3(680.f, 430.f, -120.f), 980.f, XMFLOAT3(-0.35f, -1.f, 0.18f), 0.77f, XMFLOAT3(0.20f, 0.50f, 1.00f), 3.30f }); // blue spot
+    setSpotLight(2, SpotLight{ XMFLOAT3(0.f, 460.f, 900.f), 1100.f, XMFLOAT3(0.0f, -1.f, -0.30f), 0.75f, XMFLOAT3(1.00f, 0.25f, 1.00f), 3.50f });   // magenta spot
 }
 
 void RenderingSystem::GeometryPass()
