@@ -403,20 +403,19 @@ void RenderingSystem::SetupSceneLights()
             m_spotLights[index] = light;
     };
 
-    setPointLight(0, PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 300.f, XMFLOAT3(1.00f, 0.32f, 0.32f), 1.35f });
-    setPointLight(1, PointLight{ XMFLOAT3(-140.f, 110.f, -320.f), 300.f, XMFLOAT3(1.00f, 0.72f, 0.28f), 1.25f });
-    setPointLight(2, PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 300.f, XMFLOAT3(0.28f, 0.58f, 1.00f), 1.30f });
-    setPointLight(3, PointLight{ XMFLOAT3(430.f, 120.f, -190.f), 300.f, XMFLOAT3(0.35f, 1.00f, 0.40f), 1.25f });
-    setPointLight(4, PointLight{ XMFLOAT3(-390.f, 140.f, 180.f), 320.f, XMFLOAT3(0.95f, 0.40f, 1.00f), 1.30f });
-    setPointLight(5, PointLight{ XMFLOAT3(-220.f, 120.f, 560.f), 360.f, XMFLOAT3(0.35f, 0.95f, 1.00f), 1.45f });
-    setPointLight(6, PointLight{ XMFLOAT3(240.f, 120.f, 560.f), 360.f, XMFLOAT3(1.00f, 0.88f, 0.35f), 1.45f });
-    setPointLight(7, PointLight{ XMFLOAT3(0.f, 145.f, 700.f), 420.f, XMFLOAT3(1.00f, 0.95f, 0.80f), 1.55f });
+    setPointLight(0, PointLight{ XMFLOAT3(-900.f, 140.f, -820.f), 560.f, XMFLOAT3(1.00f, 0.35f, 0.30f), 1.70f });
+    setPointLight(1, PointLight{ XMFLOAT3(-420.f, 120.f, -260.f), 420.f, XMFLOAT3(1.00f, 0.72f, 0.28f), 1.45f });
+    setPointLight(2, PointLight{ XMFLOAT3(170.f, 125.f, -280.f), 420.f, XMFLOAT3(0.28f, 0.58f, 1.00f), 1.45f });
+    setPointLight(3, PointLight{ XMFLOAT3(760.f, 140.f, -760.f), 560.f, XMFLOAT3(0.35f, 1.00f, 0.40f), 1.70f });
+    setPointLight(4, PointLight{ XMFLOAT3(-760.f, 155.f, 180.f), 520.f, XMFLOAT3(0.95f, 0.40f, 1.00f), 1.65f });
+    setPointLight(5, PointLight{ XMFLOAT3(-260.f, 130.f, 620.f), 460.f, XMFLOAT3(0.35f, 0.95f, 1.00f), 1.55f });
+    setPointLight(6, PointLight{ XMFLOAT3(300.f, 130.f, 620.f), 460.f, XMFLOAT3(1.00f, 0.88f, 0.35f), 1.55f });
+    setPointLight(7, PointLight{ XMFLOAT3(900.f, 150.f, 860.f), 620.f, XMFLOAT3(1.00f, 0.95f, 0.80f), 1.80f });
 
-    setSpotLight(0, SpotLight{ XMFLOAT3(-300.f, 330.f, -40.f), 520.f, XMFLOAT3(0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
-    setSpotLight(1, SpotLight{ XMFLOAT3(300.f, 330.f, -40.f), 520.f, XMFLOAT3(-0.25f, -1.f, 0.18f), 0.90f, XMFLOAT3(1.0f, 0.96f, 0.88f), 1.8f });
-    setSpotLight(2, SpotLight{ XMFLOAT3(0.f, 360.f, 620.f), 620.f, XMFLOAT3(0.0f, -1.f, -0.18f), 0.88f, XMFLOAT3(1.0f, 0.88f, 0.72f), 2.0f });
+    setSpotLight(0, SpotLight{ XMFLOAT3(-760.f, 420.f, -120.f), 760.f, XMFLOAT3(0.35f, -1.f, 0.18f), 0.82f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.3f });
+    setSpotLight(1, SpotLight{ XMFLOAT3(760.f, 420.f, -120.f), 760.f, XMFLOAT3(-0.35f, -1.f, 0.18f), 0.82f, XMFLOAT3(1.0f, 0.95f, 0.85f), 2.3f });
+    setSpotLight(2, SpotLight{ XMFLOAT3(0.f, 460.f, 980.f), 900.f, XMFLOAT3(0.0f, -1.f, -0.30f), 0.80f, XMFLOAT3(1.0f, 0.90f, 0.75f), 2.5f });
 }
-
 
 void RenderingSystem::GeometryPass()
 {
@@ -501,14 +500,14 @@ void RenderingSystem::UpdateFrameConstants()
     cb.EyePos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
     cb.ScreenSize = XMFLOAT2(static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()));
     cb.InvScreenSize = XMFLOAT2(1.0f / cb.ScreenSize.x, 1.0f / cb.ScreenSize.y);
-    cb.AmbientColor = XMFLOAT4(0.10f, 0.10f, 0.12f, 1.0f);
+    cb.AmbientColor = XMFLOAT4(0.16f, 0.16f, 0.18f, 1.0f);
 
-    const XMVECTOR dirLight = XMVector3Normalize(XMVectorSet(0.35f, -1.0f, 0.20f, 0.0f));
+    const XMVECTOR dirLight = XMVector3Normalize(XMVectorSet(0.20f, -1.0f, 0.10f, 0.0f));
     XMFLOAT3 dirLightNormalized;
     XMStoreFloat3(&dirLightNormalized, dirLight);
 
     cb.DirLightDirection = XMFLOAT4(dirLightNormalized.x, dirLightNormalized.y, dirLightNormalized.z, 0.0f);
-    cb.DirLightColorIntensity = XMFLOAT4(0.70f, 0.76f, 0.88f, 0.45f);
+    cb.DirLightColorIntensity = XMFLOAT4(0.95f, 0.97f, 1.00f, 1.35f);
 
     void* mapped = nullptr;
     m_frameCB->Map(0, nullptr, &mapped);
