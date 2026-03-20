@@ -1,42 +1,26 @@
-// Albedo from GBuffer (written in geometry pass)
+#include "LightingContract.hlsli"
+#include "DeferredLightingCommon.hlsli"
+
+// GBuffer textures from geometry pass.
 Texture2D gAlbedoTex   : register(t0);
 Texture2D gNormalTex   : register(t1);
-Texture2D gPositionTex : register(t2);
-Texture2D gMaterialTex : register(t3);
+Texture2D gMaterialTex : register(t2);
+Texture2D gDepthTex    : register(t3);
 SamplerState gSampler  : register(s0);
 
 cbuffer LightingFrameCB : register(b0)
 {
-    float4 gEyePos;
-    float2 gScreenSize;
-    float2 gInvScreenSize;
-    float4 gAmbientColor;
-    float4 gDirLightDirection;
-    float4 gDirLightColorIntensity;
+    LightingFrameConstants gFrame;
 };
 
-cbuffer LightVolumeCB : register(b1)
+cbuffer LocalLightsCB : register(b1)
 {
-    float4x4 gWorldViewProj;
-    float4 gPositionRange;
-    float4 gDirectionCos;
-    float4 gColorIntensity;
-};
-
-struct VSInput
-{
-    float3 Position : POSITION;
-};
-
-struct VSOutput
-{
-    float4 PositionH : SV_POSITION;
+    LocalLightConstants gLocalLights;
 };
 
 struct VSFullscreenOutput
 {
     float4 PositionH : SV_POSITION;
-    float2 UV : TEXCOORD0;
 };
 
 VSFullscreenOutput VSFullscreen(uint vertexID : SV_VertexID)
@@ -50,128 +34,156 @@ VSFullscreenOutput VSFullscreen(uint vertexID : SV_VertexID)
         float2(3.0f, -1.0f)
     };
 
-    const float2 texcoords[3] =
-    {
-        float2(0.0f, 1.0f),
-        float2(0.0f, -1.0f),
-        float2(2.0f, 1.0f)
-    };
-
     o.PositionH = float4(positions[vertexID], 0.0f, 1.0f);
-    o.UV = texcoords[vertexID];
     return o;
 }
 
-VSOutput VSVolume(VSInput vin)
+float2 GetScreenUV(float4 positionH)
 {
-    VSOutput vout;
-    vout.PositionH = mul(float4(vin.Position, 1.0f), gWorldViewProj);
-    return vout;
+    return positionH.xy * gFrame.InvScreenSize;
 }
 
-float2 GetUV(float4 positionH)
+struct SurfaceData
 {
-    return positionH.xy * gInvScreenSize;
+    float3 Albedo;
+    float3 Normal;
+    float3 SpecColor;
+    float SpecPower;
+    float3 WorldPos;
+    float3 ViewDir;
+    float Depth;
+    bool HasSurface;
+};
+
+SurfaceData LoadSurface(float2 uv)
+{
+    SurfaceData s;
+    s.Albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
+    s.Normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
+
+    float4 material = gMaterialTex.Sample(gSampler, uv);
+    s.SpecColor = material.rgb;
+    s.SpecPower = saturate(material.a) * 255.0f;
+
+    s.Depth = gDepthTex.Sample(gSampler, uv).r;
+    s.HasSurface = HasValidSurface(s.Depth);
+
+    if (s.HasSurface)
+    {
+        s.WorldPos = ReconstructWorldPosition(uv, s.Depth, gFrame.InvViewProj);
+        s.ViewDir = normalize(gFrame.EyePos.xyz - s.WorldPos);
+    }
+    else
+    {
+        s.WorldPos = 0.0f;
+        s.ViewDir = float3(0.0f, 0.0f, 1.0f);
+    }
+
+    return s;
 }
 
-float3 DecodeNormal(float3 n)
+float3 EvaluateDirectionalLight(SurfaceData s)
 {
-    return normalize(n * 2.0f - 1.0f);
+    float3 L = normalize(-gFrame.DirectionalLight.Direction);
+    float3 brdf = ComputeBlinnPhong(normalize(s.Normal), normalize(s.ViewDir), L, s.Albedo, s.SpecColor, s.SpecPower);
+    return brdf * gFrame.DirectionalLight.Color * gFrame.DirectionalLight.Intensity;
 }
 
-float3 CalcLighting(float3 P, float3 N, float3 V, float3 albedo, float3 specColor, float specPower, float3 L, float3 lightCol, float atten)
+float3 EvaluatePointLights(SurfaceData s)
 {
-    float3 H = normalize(L + V);
-    float diff = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), max(specPower, 1.0));
-    return (albedo * diff + specColor * spec) * lightCol * atten;
+    if (!s.HasSurface)
+        return 0.0f;
+
+    float3 sum = 0.0f;
+    for (uint i = 0; i < min(gFrame.PointLightCount, MAX_POINT_LIGHTS); ++i)
+    {
+        float3 lightVec = gLocalLights.PointLights[i].Position - s.WorldPos;
+        float dist = length(lightVec);
+        if (dist > gLocalLights.PointLights[i].Range || dist <= 1e-4f)
+            continue;
+
+        float3 L = lightVec / dist;
+        float attenuation = max(ComputeRangeAttenuation(dist, gLocalLights.PointLights[i].Range), 0.0f);
+        float3 brdf = ComputeBlinnPhong(normalize(s.Normal), normalize(s.ViewDir), L, s.Albedo, s.SpecColor, s.SpecPower);
+        sum += brdf * gLocalLights.PointLights[i].Color * (gLocalLights.PointLights[i].Intensity * attenuation);
+    }
+    return sum;
 }
 
-// Directional lighting shader (reads albedo/normal/position/material)
+float3 EvaluateSpotLights(SurfaceData s)
+{
+    if (!s.HasSurface)
+        return 0.0f;
+
+    float3 sum = 0.0f;
+    for (uint i = 0; i < min(gFrame.SpotLightCount, MAX_SPOT_LIGHTS); ++i)
+    {
+        float3 lightVec = gLocalLights.SpotLights[i].Position - s.WorldPos;
+        float dist = length(lightVec);
+        if (dist > gLocalLights.SpotLights[i].Range || dist <= 1e-4f)
+            continue;
+
+        float3 L = lightVec / dist;
+        float attenuation = max(ComputeRangeAttenuation(dist, gLocalLights.SpotLights[i].Range), 0.0f);
+        float cone = ComputeSpotConeAttenuation(L, gLocalLights.SpotLights[i].Direction, gLocalLights.SpotLights[i].InnerCos, gLocalLights.SpotLights[i].OuterCos);
+        if (cone <= 0.0f)
+            continue;
+
+        float3 brdf = ComputeBlinnPhong(normalize(s.Normal), normalize(s.ViewDir), L, s.Albedo, s.SpecColor, s.SpecPower);
+        sum += brdf * gLocalLights.SpotLights[i].Color * (gLocalLights.SpotLights[i].Intensity * attenuation * cone);
+    }
+    return sum;
+}
+
+float VisualizeDepth(float depth)
+{
+    if (!HasValidSurface(depth))
+        return 0.0f;
+
+    // Readable depth visualization for non-linear depth buffer.
+    return pow(saturate(1.0f - depth), 0.35f);
+}
+
 float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
 {
-    float2 uv = saturate(pin.UV);
+    const float2 uv = GetScreenUV(pin.PositionH);
+    SurfaceData s = LoadSurface(uv);
 
-    float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
-    float3 normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
-    float3 posW = gPositionTex.Sample(gSampler, uv).xyz;
-    float4 mat = gMaterialTex.Sample(gSampler, uv);
-    float3 specColor = mat.rgb;
-    float specPower = saturate(mat.a) * 255.0f;
+    if (gFrame.DebugMode == 1) return float4(s.Albedo, 1.0f);
+    if (gFrame.DebugMode == 2) return float4(s.Normal * 0.5f + 0.5f, 1.0f);
+    if (gFrame.DebugMode == 3) return gMaterialTex.Sample(gSampler, uv);
+    if (gFrame.DebugMode == 4) return float4(VisualizeDepth(s.Depth).xxx, 1.0f);
 
-    float3 V = normalize(gEyePos.xyz - posW);
-    float3 L = normalize(-gDirLightDirection.xyz);
-    float3 lit = CalcLighting(posW, normal, V, albedo, specColor, specPower, L, gDirLightColorIntensity.rgb, gDirLightColorIntensity.a);
-    float3 color = albedo * gAmbientColor.rgb + lit;
+    if (!s.HasSurface)
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-    return float4(color, 1.0f);
+    if (gFrame.DebugMode == 6 || gFrame.DebugMode == 7)
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    float3 directional = EvaluateDirectionalLight(s);
+    float3 base = (gFrame.DebugMode == 5) ? directional : (s.Albedo * gFrame.AmbientColor.rgb + directional);
+    return float4(base, 1.0f);
 }
 
-// Point-light shader (reads albedo from gAlbedoTex)
-float4 PSPoint(VSOutput pin) : SV_Target
+float4 PSLocalLights(VSFullscreenOutput pin) : SV_Target
 {
-    float2 uv = GetUV(pin.PositionH);
-    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
-        discard;
+    const float2 uv = GetScreenUV(pin.PositionH);
+    SurfaceData s = LoadSurface(uv);
 
-    float3 P = gPositionTex.Sample(gSampler, uv).xyz;
-    float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
-    float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
-    float4 mat = gMaterialTex.Sample(gSampler, uv);
-    float3 specColor = mat.rgb;
-    float specPower = saturate(mat.a) * 255.0f;
-    float3 V = normalize(gEyePos.xyz - P);
+    if (!s.HasSurface)
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-    float3 lightVec = gPositionRange.xyz - P;
-    float dist = length(lightVec);
-    float range = gPositionRange.w;
+    float3 pointContribution = EvaluatePointLights(s);
+    float3 spotContribution = EvaluateSpotLights(s);
 
-    if (dist > range || dist <= 0.0001f)
-        discard;
+    if (gFrame.DebugMode == 6)
+        return float4(pointContribution, 1.0f);
 
-    float atten = saturate(1.0f - dist / range);
-    atten *= atten;
-    float3 L = lightVec / dist;
+    if (gFrame.DebugMode == 7)
+        return float4(spotContribution, 1.0f);
 
-    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten);
-    return float4(result, 1.0f);
-}
+    if (gFrame.DebugMode == 5 || gFrame.DebugMode == 0)
+        return float4(pointContribution + spotContribution, 1.0f);
 
-// Spot-light shader (reads albedo from gAlbedoTex)
-float4 PSSpot(VSOutput pin) : SV_Target
-{
-    float2 uv = GetUV(pin.PositionH);
-    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
-        discard;
-
-    float3 P = gPositionTex.Sample(gSampler, uv).xyz;
-    float3 N = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
-    float3 albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
-    float4 mat = gMaterialTex.Sample(gSampler, uv);
-    float3 specColor = mat.rgb;
-    float specPower = saturate(mat.a) * 255.0f;
-    float3 V = normalize(gEyePos.xyz - P);
-
-    float3 lightVec = gPositionRange.xyz - P;
-    float dist = length(lightVec);
-    float range = gPositionRange.w;
-
-    if (dist > range || dist <= 0.0001f)
-        discard;
-
-    float3 L = lightVec / dist;
-    float3 spotDir = normalize(gDirectionCos.xyz);
-    float3 lightToPoint = normalize(P - gPositionRange.xyz);
-    float theta = dot(lightToPoint, spotDir);
-    float outerCos = saturate(gDirectionCos.w);
-    if (theta < outerCos)
-        discard;
-
-    float innerCos = saturate(lerp(outerCos, 1.0f, 0.20f));
-    float cone = smoothstep(outerCos, innerCos, theta);
-    float atten = saturate(1.0f - dist / range);
-    atten *= atten;
-
-    float3 result = CalcLighting(P, N, V, albedo, specColor, specPower, L, gColorIntensity.rgb, gColorIntensity.a * atten * cone);
-    return float4(result, 1.0f);
+    return float4(0.0f, 0.0f, 0.0f, 1.0f);
 }

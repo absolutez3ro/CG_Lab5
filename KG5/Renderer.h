@@ -22,18 +22,36 @@ struct Vertex {
     XMFLOAT2 TexCoord;
 };
 
-// Константы объекта (для Geometry Pass)
-struct alignas(256) ObjectConstants {
+// Geometry pass constants are intentionally split:
+// - transform constants (per draw)
+// - frame/view constants (per frame)
+// - material constants (per draw/material)
+struct ObjectTransformConstants
+{
     XMFLOAT4X4 World;
+    XMFLOAT4X4 WorldInvTranspose;
+};
+
+struct GeometryFrameConstants
+{
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
-    XMFLOAT4X4 WorldInvTranspose;
+};
+
+struct MaterialConstants
+{
     XMFLOAT4 MaterialDiffuse;
     XMFLOAT4 MaterialSpecular;
     float SpecularPower;
     int HasTexture;
     float Pad[2];
 };
+
+static_assert(sizeof(ObjectTransformConstants) % 16 == 0, "ObjectTransformConstants must be 16-byte aligned for HLSL packing.");
+static_assert(sizeof(GeometryFrameConstants) % 16 == 0, "GeometryFrameConstants must be 16-byte aligned for HLSL packing.");
+static_assert(sizeof(MaterialConstants) % 16 == 0, "MaterialConstants must be 16-byte aligned for HLSL packing.");
+// Note: these structs are packed to 16-byte boundaries; per-draw CBV offsets are padded
+// to 256-byte boundaries where uploaded (see RenderingSystem stride setup).
 
 struct GpuMaterial {
     ComPtr<ID3D12Resource> texture;
@@ -84,12 +102,18 @@ public:
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), 1, m_cbvSrvDescSize);
     }
 
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDepthSrvCpuHandle() const {
+        if (!m_cbvSrvHeap)
+            return D3D12_CPU_DESCRIPTOR_HANDLE{};
+        return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), 4, m_cbvSrvDescSize);
+    }
     const D3D12_VERTEX_BUFFER_VIEW* GetVbView() const { return &m_vbView; }
     const D3D12_INDEX_BUFFER_VIEW* GetIbView() const { return &m_ibView; }
     const std::vector<MeshSubset>& GetSubsets() const { return m_subsets; }
     const std::vector<GpuMaterial>& GetMaterials() const { return m_gpuMaterials; }
 
     void CreateBuffer(const void* data, UINT size, ID3D12Resource** resource);
+    void TransitionDepthToShaderResource();
 
 private:
     void CreateDevice();
@@ -118,6 +142,7 @@ private:
 
     ComPtr<ID3D12Resource> m_renderTargets[2];
     ComPtr<ID3D12Resource> m_depthStencil;
+    D3D12_RESOURCE_STATES m_depthState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
     ComPtr<ID3D12Fence> m_fence;
     UINT64 m_fenceValues[2] = { 0, 0 };
     HANDLE m_fenceEvent = nullptr;

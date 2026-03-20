@@ -1,6 +1,5 @@
-﻿#include "RenderingSystem.h"
+#include "RenderingSystem.h"
 #include <d3dcompiler.h>
-#include <vector>
 #include <cmath>
 #include <stdexcept>
 #include <cstdint>
@@ -17,7 +16,6 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
 {
     if (!m_renderer.Init(hwnd, width, height))
         return false;
-
 
     m_gbuffer.Initialize(
         m_renderer.GetDevice(),
@@ -39,17 +37,19 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
 
     CreateRootSignatures();
     CreatePSOs();
-    CreateLightMeshes();
     SetupSceneLights();
 
-    m_objectCbStride = (sizeof(ObjectConstants) + 255u) & ~255u;
+    m_objectTransformCbStride = (sizeof(ObjectTransformConstants) + 255u) & ~255u;
+    m_materialCbStride = (sizeof(MaterialConstants) + 255u) & ~255u;
     m_maxObjectCbCount = 8192;
-    m_renderer.CreateBuffer(nullptr, m_objectCbStride * m_maxObjectCbCount, &m_objectCB);
-    m_renderer.CreateBuffer(nullptr, sizeof(LightingFrameConstants), &m_frameCB);
-    m_renderer.CreateBuffer(nullptr, sizeof(LightVolumeConstants), &m_lightVolCB);
+
+    m_renderer.CreateBuffer(nullptr, m_objectTransformCbStride * m_maxObjectCbCount, &m_objectTransformCB);
+    m_renderer.CreateBuffer(nullptr, m_materialCbStride * m_maxObjectCbCount, &m_materialCB);
+    m_renderer.CreateBuffer(nullptr, sizeof(GeometryFrameConstants), &m_geometryFrameCB);
+    m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LightingFrameConstants), &m_frameCB);
+    m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LocalLightConstants), &m_localLightsCB);
 
     m_initialized = true;
-
     return true;
 }
 
@@ -59,6 +59,12 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'S') m_moveBackward = true;
     if (key == 'A') m_moveLeft = true;
     if (key == 'D') m_moveRight = true;
+
+    // Debug modes:
+    // 0=Final, 1=Albedo, 2=Normal, 3=Material, 4=Depth,
+    // 5=Lighting only, 6=Point only, 7=Spot only.
+    if (key >= '0' && key <= '7')
+        m_debugMode = static_cast<UINT>(key - '0');
 }
 
 void RenderingSystem::OnKeyUp(WPARAM key)
@@ -113,10 +119,6 @@ void RenderingSystem::UpdateCamera(float dt)
 {
     const float sinYaw = std::sin(m_yaw);
     const float cosYaw = std::cos(m_yaw);
-    const float sinPitch = std::sin(m_pitch);
-    const float cosPitch = std::cos(m_pitch);
-
-    XMVECTOR forward = XMVector3Normalize(XMVectorSet(cosPitch * sinYaw, sinPitch, cosPitch * cosYaw, 0.0f));
     XMVECTOR forwardXZ = XMVector3Normalize(XMVectorSet(sinYaw, 0.0f, cosYaw, 0.0f));
     XMVECTOR rightXZ = XMVector3Normalize(XMVectorSet(cosYaw, 0.0f, -sinYaw, 0.0f));
 
@@ -171,9 +173,11 @@ void RenderingSystem::CreateRootSignatures()
         CD3DX12_DESCRIPTOR_RANGE srvRange;
         srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
-        CD3DX12_ROOT_PARAMETER params[2];
-        params[0].InitAsConstantBufferView(0);
-        params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        CD3DX12_ROOT_PARAMETER params[4];
+        params[0].InitAsConstantBufferView(0); // ObjectTransformConstants
+        params[1].InitAsConstantBufferView(1); // GeometryFrameConstants
+        params[2].InitAsConstantBufferView(2); // MaterialConstants
+        params[3].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
         CD3DX12_STATIC_SAMPLER_DESC sampler(
             0,
@@ -183,7 +187,7 @@ void RenderingSystem::CreateRootSignatures()
             D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
-            2,
+            4,
             params,
             1,
             &sampler,
@@ -198,10 +202,37 @@ void RenderingSystem::CreateRootSignatures()
         CD3DX12_DESCRIPTOR_RANGE srvRange;
         srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
 
-        CD3DX12_ROOT_PARAMETER params[3];
-        params[0].InitAsConstantBufferView(0);
+        CD3DX12_ROOT_PARAMETER params[2];
+        params[0].InitAsConstantBufferView(0); // LightingFrameConstants
         params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
-        params[2].InitAsConstantBufferView(1);
+
+        CD3DX12_STATIC_SAMPLER_DESC sampler(
+            0,
+            D3D12_FILTER_MIN_MAG_MIP_POINT,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(
+            2,
+            params,
+            1,
+            &sampler,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serialized, errors;
+        RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_lightingDirectionalRS)));
+    }
+
+    {
+        CD3DX12_DESCRIPTOR_RANGE srvRange;
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+
+        CD3DX12_ROOT_PARAMETER params[3];
+        params[0].InitAsConstantBufferView(0); // LightingFrameConstants
+        params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[2].InitAsConstantBufferView(1); // LocalLightConstants
 
         CD3DX12_STATIC_SAMPLER_DESC sampler(
             0,
@@ -219,7 +250,7 @@ void RenderingSystem::CreateRootSignatures()
 
         ComPtr<ID3DBlob> serialized, errors;
         RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
-        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_lightingRS)));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_lightingLocalRS)));
     }
 }
 
@@ -230,11 +261,35 @@ void RenderingSystem::CreatePSOs()
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
 
-    ComPtr<ID3DBlob> errors;
-    RS_ThrowIfFailed(D3DCompileFromFile(L"GeometryPass.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", flags, 0, &m_geoVS, &errors));
-    RS_ThrowIfFailed(D3DCompileFromFile(L"GeometryPass.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", flags, 0, &m_geoPS, &errors));
-    RS_ThrowIfFailed(D3DCompileFromFile(L"LightingPass.hlsl", nullptr, nullptr, "VSFullscreen", "vs_5_0", flags, 0, &m_lightFullscreenVS, &errors));
-    RS_ThrowIfFailed(D3DCompileFromFile(L"LightingPass.hlsl", nullptr, nullptr, "VSVolume", "vs_5_0", flags, 0, &m_lightVS, &errors));
+    auto compileShader = [&](const wchar_t* file, const char* entry, const char* target, ComPtr<ID3DBlob>& outBlob)
+    {
+        ComPtr<ID3DBlob> errors;
+        const HRESULT hr = D3DCompileFromFile(
+            file,
+            nullptr,
+            D3D_COMPILE_STANDARD_FILE_INCLUDE,
+            entry,
+            target,
+            flags,
+            0,
+            &outBlob,
+            &errors);
+
+        if (FAILED(hr))
+        {
+            std::string message = "Shader compilation failed";
+            if (errors && errors->GetBufferPointer())
+            {
+                message += ": ";
+                message += static_cast<const char*>(errors->GetBufferPointer());
+            }
+            throw std::runtime_error(message);
+        }
+    };
+
+    compileShader(L"GeometryPass.hlsl", "VSMain", "vs_5_0", m_geoVS);
+    compileShader(L"GeometryPass.hlsl", "PSMain", "ps_5_0", m_geoPS);
+    compileShader(L"LightingPass.hlsl", "VSFullscreen", "vs_5_0", m_lightFullscreenVS);
 
     D3D12_INPUT_ELEMENT_DESC geoLayout[] =
     {
@@ -253,57 +308,37 @@ void RenderingSystem::CreatePSOs()
     geoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     geoDesc.SampleMask = UINT_MAX;
     geoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    geoDesc.NumRenderTargets = 4;
+    geoDesc.NumRenderTargets = 3;
     geoDesc.RTVFormats[0] = m_gbuffer.GetFormat(GBuffer::Albedo);
     geoDesc.RTVFormats[1] = m_gbuffer.GetFormat(GBuffer::Normal);
-    geoDesc.RTVFormats[2] = m_gbuffer.GetFormat(GBuffer::Position);
-    geoDesc.RTVFormats[3] = m_gbuffer.GetFormat(GBuffer::Material);
+    geoDesc.RTVFormats[2] = m_gbuffer.GetFormat(GBuffer::Material);
     geoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     geoDesc.SampleDesc.Count = 1;
 
     RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&geoDesc, IID_PPV_ARGS(&m_geometryPSO)));
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC dirDesc{};
-    ComPtr<ID3DBlob> dirPS;
-    RS_ThrowIfFailed(D3DCompileFromFile(L"LightingPass.hlsl", nullptr, nullptr, "PSDirectional", "ps_5_0", flags, 0, &dirPS, &errors));
-    dirDesc.InputLayout = { nullptr, 0 };
-    dirDesc.pRootSignature = m_lightingRS.Get();
-    dirDesc.VS = { m_lightFullscreenVS->GetBufferPointer(), m_lightFullscreenVS->GetBufferSize() };
-    dirDesc.PS = { dirPS->GetBufferPointer(), dirPS->GetBufferSize() };
-    dirDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    dirDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    dirDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    dirDesc.DepthStencilState.DepthEnable = FALSE;
-    dirDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    dirDesc.SampleMask = UINT_MAX;
-    dirDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    dirDesc.NumRenderTargets = 1;
-    dirDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    dirDesc.SampleDesc.Count = 1;
-    RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&dirDesc, IID_PPV_ARGS(&m_psoDirectional)));
-
-    D3D12_INPUT_ELEMENT_DESC lightLayout[] =
-    {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-    };
-
-    auto makeVolumePso = [&](const char* psEntry, ComPtr<ID3D12PipelineState>& outPSO)
+    auto makeFullscreenLightingPso = [&](const char* psEntry, bool additive, ID3D12RootSignature* rootSignature, ComPtr<ID3D12PipelineState>& outPSO)
     {
         ComPtr<ID3DBlob> psBlob;
-        RS_ThrowIfFailed(D3DCompileFromFile(L"LightingPass.hlsl", nullptr, nullptr, psEntry, "ps_5_0", flags, 0, &psBlob, &errors));
+        compileShader(L"LightingPass.hlsl", psEntry, "ps_5_0", psBlob);
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
-        desc.InputLayout = { lightLayout, _countof(lightLayout) };
-        desc.pRootSignature = m_lightingRS.Get();
-        desc.VS = { m_lightVS->GetBufferPointer(), m_lightVS->GetBufferSize() };
+        desc.InputLayout = { nullptr, 0 };
+        desc.pRootSignature = rootSignature;
+        desc.VS = { m_lightFullscreenVS->GetBufferPointer(), m_lightFullscreenVS->GetBufferSize() };
         desc.PS = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
         desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        desc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        desc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
-        desc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        if (additive)
+        {
+            desc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+            desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+            desc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+            desc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+        }
+
         desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         desc.DepthStencilState.DepthEnable = FALSE;
         desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -316,125 +351,92 @@ void RenderingSystem::CreatePSOs()
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&outPSO)));
     };
 
-    makeVolumePso("PSPoint", m_psoPoint);
-    makeVolumePso("PSSpot", m_psoSpot);
+    makeFullscreenLightingPso("PSDirectional", false, m_lightingDirectionalRS.Get(), m_psoDirectional);
+    makeFullscreenLightingPso("PSLocalLights", true, m_lightingLocalRS.Get(), m_psoLocal);
 }
 
-void RenderingSystem::CreateLightMeshes()
-{
-    struct LightVertex { XMFLOAT3 Position; };
-
-    std::vector<LightVertex> vertices;
-    std::vector<UINT> indices;
-
-    const UINT sliceCount = 16;
-    const UINT stackCount = 12;
-
-    vertices.push_back({ XMFLOAT3(0.f, 1.f, 0.f) });
-    for (UINT stack = 1; stack <= stackCount - 1; ++stack)
-    {
-        const float phi = XM_PI * stack / stackCount;
-        for (UINT slice = 0; slice <= sliceCount; ++slice)
-        {
-            const float theta = XM_2PI * slice / sliceCount;
-            vertices.push_back({ XMFLOAT3(std::sin(phi) * std::cos(theta), std::cos(phi), std::sin(phi) * std::sin(theta)) });
-        }
-    }
-    vertices.push_back({ XMFLOAT3(0.f, -1.f, 0.f) });
-
-    for (UINT i = 1; i <= sliceCount; ++i)
-    {
-        indices.push_back(0);
-        indices.push_back(i + 1);
-        indices.push_back(i);
-    }
-
-    UINT baseIndex = 1;
-    UINT ringVertexCount = sliceCount + 1;
-    for (UINT stack = 0; stack < stackCount - 2; ++stack)
-    {
-        for (UINT slice = 0; slice < sliceCount; ++slice)
-        {
-            indices.push_back(baseIndex + stack * ringVertexCount + slice);
-            indices.push_back(baseIndex + stack * ringVertexCount + slice + 1);
-            indices.push_back(baseIndex + (stack + 1) * ringVertexCount + slice);
-            indices.push_back(baseIndex + (stack + 1) * ringVertexCount + slice);
-            indices.push_back(baseIndex + stack * ringVertexCount + slice + 1);
-            indices.push_back(baseIndex + (stack + 1) * ringVertexCount + slice + 1);
-        }
-    }
-
-    const UINT southPoleIndex = static_cast<UINT>(vertices.size() - 1);
-    baseIndex = southPoleIndex - ringVertexCount;
-    for (UINT i = 0; i < sliceCount; ++i)
-    {
-        indices.push_back(southPoleIndex);
-        indices.push_back(baseIndex + i);
-        indices.push_back(baseIndex + i + 1);
-    }
-
-    m_renderer.CreateBuffer(vertices.data(), static_cast<UINT>(vertices.size() * sizeof(LightVertex)), &m_sphereVB);
-    m_renderer.CreateBuffer(indices.data(), static_cast<UINT>(indices.size() * sizeof(UINT)), &m_sphereIB);
-
-    m_sphereVBV.BufferLocation = m_sphereVB->GetGPUVirtualAddress();
-    m_sphereVBV.StrideInBytes = sizeof(LightVertex);
-    m_sphereVBV.SizeInBytes = static_cast<UINT>(vertices.size() * sizeof(LightVertex));
-
-    m_sphereIBV.BufferLocation = m_sphereIB->GetGPUVirtualAddress();
-    m_sphereIBV.Format = DXGI_FORMAT_R32_UINT;
-    m_sphereIBV.SizeInBytes = static_cast<UINT>(indices.size() * sizeof(UINT));
-    m_sphereIndexCount = static_cast<UINT>(indices.size());
-}
-
-// === Light setup block (Point + Spot lights) ===
 void RenderingSystem::SetupSceneLights()
 {
-    m_pointLights.fill(PointLight{});
-    m_spotLights.fill(SpotLight{});
+    m_pointLights.fill(LightingContract::PointLightData{});
+    m_spotLights.fill(LightingContract::SpotLightData{});
+    m_activePointLights = 0;
+    m_activeSpotLights = 0;
 
-    auto setPointLight = [this](size_t index, const PointLight& light)
+    auto setPointLight = [this](size_t index, const LightingContract::PointLightData& light)
     {
         if (index < m_pointLights.size())
+        {
             m_pointLights[index] = light;
+            const UINT usedCount = static_cast<UINT>(index + 1);
+            if (usedCount > m_activePointLights)
+                m_activePointLights = usedCount;
+        }
     };
 
-    auto setSpotLight = [this](size_t index, const SpotLight& light)
+    auto setSpotLight = [this](size_t index, const LightingContract::SpotLightData& light)
     {
         if (index < m_spotLights.size())
+        {
             m_spotLights[index] = light;
+            const UINT usedCount = static_cast<UINT>(index + 1);
+            if (usedCount > m_activeSpotLights)
+                m_activeSpotLights = usedCount;
+        }
     };
 
-    // Point lights: split between left/right sides and front/back to avoid clustering.
-    setPointLight(0, PointLight{ XMFLOAT3(-620.f, 130.f, -520.f), 520.f, XMFLOAT3(1.00f, 0.25f, 0.20f), 2.20f }); // red (left-front)
-    setPointLight(1, PointLight{ XMFLOAT3(-620.f, 135.f, 520.f), 520.f, XMFLOAT3(0.20f, 0.55f, 1.00f), 2.20f });  // blue (left-back)
-    setPointLight(2, PointLight{ XMFLOAT3(-260.f, 135.f, -40.f), 500.f, XMFLOAT3(1.00f, 0.72f, 0.20f), 2.10f });  // amber (left-center)
-    setPointLight(3, PointLight{ XMFLOAT3(-120.f, 145.f, 760.f), 520.f, XMFLOAT3(0.20f, 0.95f, 1.00f), 2.20f });  // cyan (left-far)
+    setPointLight(0, LightingContract::PointLightData{ XMFLOAT3(-620.f, 130.f, -520.f), 520.f, XMFLOAT3(1.00f, 0.25f, 0.20f), 2.20f });
+    setPointLight(1, LightingContract::PointLightData{ XMFLOAT3(-620.f, 135.f, 520.f), 520.f, XMFLOAT3(0.20f, 0.55f, 1.00f), 2.20f });
+    setPointLight(2, LightingContract::PointLightData{ XMFLOAT3(-260.f, 135.f, -40.f), 500.f, XMFLOAT3(1.00f, 0.72f, 0.20f), 2.10f });
+    setPointLight(3, LightingContract::PointLightData{ XMFLOAT3(-120.f, 145.f, 760.f), 520.f, XMFLOAT3(0.20f, 0.95f, 1.00f), 2.20f });
+    setPointLight(4, LightingContract::PointLightData{ XMFLOAT3(620.f, 130.f, -520.f), 520.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 2.20f });
+    setPointLight(5, LightingContract::PointLightData{ XMFLOAT3(620.f, 135.f, 520.f), 520.f, XMFLOAT3(1.00f, 0.92f, 0.30f), 2.20f });
+    setPointLight(6, LightingContract::PointLightData{ XMFLOAT3(260.f, 135.f, -40.f), 500.f, XMFLOAT3(0.95f, 0.35f, 1.00f), 2.10f });
+    setPointLight(7, LightingContract::PointLightData{ XMFLOAT3(120.f, 145.f, 760.f), 520.f, XMFLOAT3(1.00f, 0.88f, 0.80f), 2.20f });
 
-    setPointLight(4, PointLight{ XMFLOAT3(620.f, 130.f, -520.f), 520.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 2.20f });   // green (right-front)
-    setPointLight(5, PointLight{ XMFLOAT3(620.f, 135.f, 520.f), 520.f, XMFLOAT3(1.00f, 0.92f, 0.30f), 2.20f });    // yellow (right-back)
-    setPointLight(6, PointLight{ XMFLOAT3(260.f, 135.f, -40.f), 500.f, XMFLOAT3(0.95f, 0.35f, 1.00f), 2.10f });     // magenta (right-center)
-    setPointLight(7, PointLight{ XMFLOAT3(120.f, 145.f, 760.f), 520.f, XMFLOAT3(1.00f, 0.88f, 0.80f), 2.20f });     // warm white (right-far)
+    LightingContract::SpotLightData leftSpot{};
+    leftSpot.Position = XMFLOAT3(-760.f, 430.f, -180.f);
+    leftSpot.Range = 900.f;
+    leftSpot.Direction = XMFLOAT3(0.35f, -1.f, 0.12f);
+    leftSpot.InnerCos = 0.88f;
+    leftSpot.Color = XMFLOAT3(1.00f, 0.20f, 0.20f);
+    leftSpot.OuterCos = 0.79f;
+    leftSpot.Intensity = 2.40f;
+    setSpotLight(0, leftSpot);
 
-    // Spot lights: distinct RGB colors, separated across opposite sides.
-    setSpotLight(0, SpotLight{ XMFLOAT3(-760.f, 430.f, -180.f), 900.f, XMFLOAT3(0.35f, -1.f, 0.12f), 0.79f, XMFLOAT3(1.00f, 0.20f, 0.20f), 2.40f }); // red spot (left)
-    setSpotLight(1, SpotLight{ XMFLOAT3(760.f, 430.f, -180.f), 900.f, XMFLOAT3(-0.35f, -1.f, 0.12f), 0.79f, XMFLOAT3(0.20f, 1.00f, 0.30f), 2.40f }); // green spot (right)
-    setSpotLight(2, SpotLight{ XMFLOAT3(0.f, 460.f, 980.f), 980.f, XMFLOAT3(0.0f, -1.f, -0.28f), 0.78f, XMFLOAT3(0.25f, 0.50f, 1.00f), 2.20f });   // blue spot (back)
+    LightingContract::SpotLightData rightSpot{};
+    rightSpot.Position = XMFLOAT3(760.f, 430.f, -180.f);
+    rightSpot.Range = 900.f;
+    rightSpot.Direction = XMFLOAT3(-0.35f, -1.f, 0.12f);
+    rightSpot.InnerCos = 0.88f;
+    rightSpot.Color = XMFLOAT3(0.20f, 1.00f, 0.30f);
+    rightSpot.OuterCos = 0.79f;
+    rightSpot.Intensity = 2.40f;
+    setSpotLight(1, rightSpot);
+
+    LightingContract::SpotLightData backSpot{};
+    backSpot.Position = XMFLOAT3(0.f, 460.f, 980.f);
+    backSpot.Range = 980.f;
+    backSpot.Direction = XMFLOAT3(0.0f, -1.f, -0.28f);
+    backSpot.InnerCos = 0.87f;
+    backSpot.Color = XMFLOAT3(0.25f, 0.50f, 1.00f);
+    backSpot.OuterCos = 0.78f;
+    backSpot.Intensity = 2.20f;
+    setSpotLight(2, backSpot);
 }
 
 void RenderingSystem::GeometryPass()
 {
     auto cmdList = m_renderer.GetCmdList();
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] =
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] =
     {
-        m_gbuffer.GetRTV(GBuffer::Albedo),
-        m_gbuffer.GetRTV(GBuffer::Normal),
-        m_gbuffer.GetRTV(GBuffer::Position),
-        m_gbuffer.GetRTV(GBuffer::Material),
+        m_gbuffer.GetRtvHandle(GBuffer::Albedo),
+        m_gbuffer.GetRtvHandle(GBuffer::Normal),
+        m_gbuffer.GetRtvHandle(GBuffer::Material),
     };
 
     auto dsv = m_renderer.GetDsvHandle();
-    cmdList->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+    cmdList->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     cmdList->SetGraphicsRootSignature(m_geometryRS.Get());
@@ -446,15 +448,28 @@ void RenderingSystem::GeometryPass()
     ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
+    GeometryFrameConstants frame{};
+    frame.View = m_view;
+    frame.Proj = m_proj;
+
+    void* frameMapped = nullptr;
+    m_geometryFrameCB->Map(0, nullptr, &frameMapped);
+    memcpy(frameMapped, &frame, sizeof(frame));
+    m_geometryFrameCB->Unmap(0, nullptr);
+
     const auto& subsets = m_renderer.GetSubsets();
     const auto& materials = m_renderer.GetMaterials();
 
     if (subsets.empty())
         return;
 
-    void* mapped = nullptr;
-    m_objectCB->Map(0, nullptr, &mapped);
-    std::uint8_t* cbBase = reinterpret_cast<std::uint8_t*>(mapped);
+    void* transformMapped = nullptr;
+    void* materialMapped = nullptr;
+    m_objectTransformCB->Map(0, nullptr, &transformMapped);
+    m_materialCB->Map(0, nullptr, &materialMapped);
+
+    std::uint8_t* transformBase = reinterpret_cast<std::uint8_t*>(transformMapped);
+    std::uint8_t* materialBase = reinterpret_cast<std::uint8_t*>(materialMapped);
 
     for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
     {
@@ -463,56 +478,68 @@ void RenderingSystem::GeometryPass()
 
         const auto& s = subsets[subsetIndex];
 
-        ObjectConstants obj{};
-        XMStoreFloat4x4(&obj.World, XMMatrixTranspose(XMMatrixIdentity()));
-        obj.View = m_view;
-        obj.Proj = m_proj;
-        XMStoreFloat4x4(&obj.WorldInvTranspose, XMMatrixTranspose(XMMatrixIdentity()));
-        obj.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
-        obj.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
-        obj.SpecularPower = 32.0f;
-        obj.HasTexture = 0;
+        ObjectTransformConstants transform{};
+        XMStoreFloat4x4(&transform.World, XMMatrixTranspose(XMMatrixIdentity()));
+        XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(XMMatrixIdentity()));
+
+        MaterialConstants material{};
+        material.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
+        material.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
+        material.SpecularPower = 32.0f;
+        material.HasTexture = 0;
 
         UINT textureSrv = 0;
         if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
         {
             const auto& mat = materials[s.materialIdx];
-            obj.MaterialDiffuse = mat.diffuse;
-            obj.MaterialSpecular = mat.specular;
-            obj.SpecularPower = mat.specPower;
+            material.MaterialDiffuse = mat.diffuse;
+            material.MaterialSpecular = mat.specular;
+            material.SpecularPower = mat.specPower;
             if (mat.srvHeapIndex >= 0)
             {
-                obj.HasTexture = 1;
+                material.HasTexture = 1;
                 textureSrv = static_cast<UINT>(mat.srvHeapIndex);
             }
         }
 
-        const UINT cbOffset = static_cast<UINT>(subsetIndex * m_objectCbStride);
-        memcpy(cbBase + cbOffset, &obj, sizeof(obj));
+        const UINT transformOffset = static_cast<UINT>(subsetIndex * m_objectTransformCbStride);
+        const UINT materialOffset = static_cast<UINT>(subsetIndex * m_materialCbStride);
 
-        cmdList->SetGraphicsRootConstantBufferView(0, m_objectCB->GetGPUVirtualAddress() + cbOffset);
-        cmdList->SetGraphicsRootDescriptorTable(1, m_renderer.GetSrvGpuHandle(textureSrv));
+        memcpy(transformBase + transformOffset, &transform, sizeof(transform));
+        memcpy(materialBase + materialOffset, &material, sizeof(material));
+
+        cmdList->SetGraphicsRootConstantBufferView(0, m_objectTransformCB->GetGPUVirtualAddress() + transformOffset);
+        cmdList->SetGraphicsRootConstantBufferView(1, m_geometryFrameCB->GetGPUVirtualAddress());
+        cmdList->SetGraphicsRootConstantBufferView(2, m_materialCB->GetGPUVirtualAddress() + materialOffset);
+        cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(textureSrv));
         cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
     }
 
-    m_objectCB->Unmap(0, nullptr);
+    m_objectTransformCB->Unmap(0, nullptr);
+    m_materialCB->Unmap(0, nullptr);
 }
 
-// === Directional light block (frame constants for PSDirectional) ===
 void RenderingSystem::UpdateFrameConstants()
 {
-    LightingFrameConstants cb{};
+    LightingContract::LightingFrameConstants cb{};
     cb.EyePos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
     cb.ScreenSize = XMFLOAT2(static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()));
     cb.InvScreenSize = XMFLOAT2(1.0f / cb.ScreenSize.x, 1.0f / cb.ScreenSize.y);
     cb.AmbientColor = XMFLOAT4(0.16f, 0.16f, 0.18f, 1.0f);
 
     const XMVECTOR dirLight = XMVector3Normalize(XMVectorSet(0.20f, -1.0f, 0.10f, 0.0f));
-    XMFLOAT3 dirLightNormalized;
-    XMStoreFloat3(&dirLightNormalized, dirLight);
+    XMStoreFloat3(&cb.DirectionalLight.Direction, dirLight);
+    cb.DirectionalLight.Color = XMFLOAT3(0.95f, 0.97f, 1.00f);
+    cb.DirectionalLight.Intensity = 1.35f;
 
-    cb.DirLightDirection = XMFLOAT4(dirLightNormalized.x, dirLightNormalized.y, dirLightNormalized.z, 0.0f);
-    cb.DirLightColorIntensity = XMFLOAT4(0.95f, 0.97f, 1.00f, 1.35f);
+    XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    XMStoreFloat4x4(&cb.InvViewProj, XMMatrixTranspose(invViewProj));
+
+    cb.PointLightCount = m_activePointLights;
+    cb.SpotLightCount = m_activeSpotLights;
+    cb.DebugMode = m_debugMode;
 
     void* mapped = nullptr;
     m_frameCB->Map(0, nullptr, &mapped);
@@ -520,122 +547,69 @@ void RenderingSystem::UpdateFrameConstants()
     m_frameCB->Unmap(0, nullptr);
 }
 
-void RenderingSystem::UpdatePointLightCB(const PointLight& light)
+void RenderingSystem::UpdateLocalLightConstants()
 {
-    XMMATRIX world = XMMatrixScaling(light.Range, light.Range, light.Range) * XMMatrixTranslation(light.Position.x, light.Position.y, light.Position.z);
-    XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
-    XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    LightingContract::LocalLightConstants lights{};
 
-    LightVolumeConstants cb{};
-    XMStoreFloat4x4(&cb.WorldViewProj, XMMatrixTranspose(world * view * proj));
-    cb.PositionRange = XMFLOAT4(light.Position.x, light.Position.y, light.Position.z, light.Range);
-    cb.DirectionCos = XMFLOAT4(0, 0, 0, 0);
-    cb.ColorIntensity = XMFLOAT4(light.Color.x, light.Color.y, light.Color.z, light.Intensity);
+    for (UINT i = 0; i < m_activePointLights; ++i)
+    {
+        lights.PointLights[i] = m_pointLights[i];
+    }
+
+    for (UINT i = 0; i < m_activeSpotLights; ++i)
+    {
+        lights.SpotLights[i] = m_spotLights[i];
+
+        XMVECTOR direction = XMVector3Normalize(XMLoadFloat3(&lights.SpotLights[i].Direction));
+        XMStoreFloat3(&lights.SpotLights[i].Direction, direction);
+
+        lights.SpotLights[i].OuterCos = std::clamp(lights.SpotLights[i].OuterCos, 0.0f, 0.9999f);
+        lights.SpotLights[i].InnerCos = std::clamp(lights.SpotLights[i].InnerCos, lights.SpotLights[i].OuterCos, 0.9999f);
+    }
 
     void* mapped = nullptr;
-    m_lightVolCB->Map(0, nullptr, &mapped);
-    memcpy(mapped, &cb, sizeof(cb));
-    m_lightVolCB->Unmap(0, nullptr);
+    m_localLightsCB->Map(0, nullptr, &mapped);
+    memcpy(mapped, &lights, sizeof(lights));
+    m_localLightsCB->Unmap(0, nullptr);
 }
 
-void RenderingSystem::UpdateSpotLightCB(const SpotLight& light)
-{
-    XMMATRIX world = XMMatrixScaling(light.Range, light.Range, light.Range) * XMMatrixTranslation(light.Position.x, light.Position.y, light.Position.z);
-    XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
-    XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
-
-    XMVECTOR d = XMVector3Normalize(XMLoadFloat3(&light.Direction));
-    XMFLOAT3 normDir;
-    XMStoreFloat3(&normDir, d);
-
-    LightVolumeConstants cb{};
-    XMStoreFloat4x4(&cb.WorldViewProj, XMMatrixTranspose(world * view * proj));
-    cb.PositionRange = XMFLOAT4(light.Position.x, light.Position.y, light.Position.z, light.Range);
-    const float clampedCos = std::clamp(light.CosAngle, 0.0f, 0.999f);
-    cb.DirectionCos = XMFLOAT4(normDir.x, normDir.y, normDir.z, clampedCos);
-    cb.ColorIntensity = XMFLOAT4(light.Color.x, light.Color.y, light.Color.z, light.Intensity);
-
-    void* mapped = nullptr;
-    m_lightVolCB->Map(0, nullptr, &mapped);
-    memcpy(mapped, &cb, sizeof(cb));
-    m_lightVolCB->Unmap(0, nullptr);
-}
-
-// === Directional light pass ===
 void RenderingSystem::LightingPassDirectional()
 {
     auto cmdList = m_renderer.GetCmdList();
     auto rtv = m_renderer.GetBackBufferRtv();
 
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    cmdList->SetGraphicsRootSignature(m_lightingRS.Get());
+    cmdList->SetGraphicsRootSignature(m_lightingDirectionalRS.Get());
     cmdList->SetPipelineState(m_psoDirectional.Get());
 
     ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
     cmdList->SetGraphicsRootConstantBufferView(0, m_frameCB->GetGPUVirtualAddress());
-    cmdList->SetGraphicsRootDescriptorTable(1, m_gbuffer.GetFirstSRVGpu());
-    cmdList->SetGraphicsRootConstantBufferView(2, m_lightVolCB->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootDescriptorTable(1, m_gbuffer.GetFirstSrvGpu());
 
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
-// === Point lights pass ===
-void RenderingSystem::LightingPassPoint()
+void RenderingSystem::LightingPassLocal()
 {
     auto cmdList = m_renderer.GetCmdList();
     auto rtv = m_renderer.GetBackBufferRtv();
 
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    cmdList->SetGraphicsRootSignature(m_lightingRS.Get());
-    cmdList->SetPipelineState(m_psoPoint.Get());
+    cmdList->SetGraphicsRootSignature(m_lightingLocalRS.Get());
+    cmdList->SetPipelineState(m_psoLocal.Get());
 
     ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
     cmdList->SetGraphicsRootConstantBufferView(0, m_frameCB->GetGPUVirtualAddress());
-    cmdList->SetGraphicsRootDescriptorTable(1, m_gbuffer.GetFirstSRVGpu());
+    cmdList->SetGraphicsRootDescriptorTable(1, m_gbuffer.GetFirstSrvGpu());
+    cmdList->SetGraphicsRootConstantBufferView(2, m_localLightsCB->GetGPUVirtualAddress());
 
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->IASetVertexBuffers(0, 1, &m_sphereVBV);
-    cmdList->IASetIndexBuffer(&m_sphereIBV);
-
-    for (const auto& light : m_pointLights)
-    {
-        UpdatePointLightCB(light);
-        cmdList->SetGraphicsRootConstantBufferView(2, m_lightVolCB->GetGPUVirtualAddress());
-        cmdList->DrawIndexedInstanced(m_sphereIndexCount, 1, 0, 0, 0);
-    }
-}
-
-// === Spot lights pass ===
-void RenderingSystem::LightingPassSpot()
-{
-    auto cmdList = m_renderer.GetCmdList();
-    auto rtv = m_renderer.GetBackBufferRtv();
-
-    cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    cmdList->SetGraphicsRootSignature(m_lightingRS.Get());
-    cmdList->SetPipelineState(m_psoSpot.Get());
-
-    ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
-    cmdList->SetDescriptorHeaps(1, heaps);
-
-    cmdList->SetGraphicsRootConstantBufferView(0, m_frameCB->GetGPUVirtualAddress());
-    cmdList->SetGraphicsRootDescriptorTable(1, m_gbuffer.GetFirstSRVGpu());
-
-    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmdList->IASetVertexBuffers(0, 1, &m_sphereVBV);
-    cmdList->IASetIndexBuffer(&m_sphereIBV);
-
-    for (const auto& light : m_spotLights)
-    {
-        UpdateSpotLightCB(light);
-        cmdList->SetGraphicsRootConstantBufferView(2, m_lightVolCB->GetGPUVirtualAddress());
-        cmdList->DrawIndexedInstanced(m_sphereIndexCount, 1, 0, 0, 0);
-    }
+    cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
 void RenderingSystem::DrawScene(float totalTime, float deltaTime)
@@ -645,17 +619,23 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
     auto cmdList = m_renderer.GetCmdList();
 
-    m_gbuffer.TransitionToRenderTarget(cmdList);
+    m_gbuffer.BeginGeometryPass(cmdList);
     m_gbuffer.Clear(cmdList);
-
     GeometryPass();
 
-    m_gbuffer.TransitionToShaderResource(cmdList);
+    m_renderer.TransitionDepthToShaderResource();
+    m_gbuffer.EndGeometryPass(cmdList);
 
     UpdateFrameConstants();
+    UpdateLocalLightConstants();
+
     LightingPassDirectional();
-    LightingPassPoint();
-    LightingPassSpot();
+
+    // Local lights are only needed in final and lighting debug modes.
+    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 7)
+    {
+        LightingPassLocal();
+    }
 }
 
 void RenderingSystem::OnResize(int width, int height)

@@ -218,7 +218,7 @@ void Renderer::CreateDepthStencilView()
     depthDesc.Height = static_cast<UINT>(m_height);
     depthDesc.DepthOrArraySize = 1;
     depthDesc.MipLevels = 1;
-    depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
     depthDesc.SampleDesc.Count = 1;
     depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
@@ -244,6 +244,15 @@ void Renderer::CreateDepthStencilView()
     dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
     m_device->CreateDepthStencilView(m_depthStencil.Get(), &dsvDesc, m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc{};
+    depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depthSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depthSrvDesc.Texture2D.MostDetailedMip = 0;
+    depthSrvDesc.Texture2D.MipLevels = 1;
+    depthSrvDesc.Texture2D.PlaneSlice = 0;
+    depthSrvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+    m_device->CreateShaderResourceView(m_depthStencil.Get(), &depthSrvDesc, GetDepthSrvCpuHandle());
 }
 
 void Renderer::CreateFence()
@@ -273,6 +282,16 @@ void Renderer::BeginFrame()
         D3D12_RESOURCE_STATE_PRESENT,
         D3D12_RESOURCE_STATE_RENDER_TARGET);
     m_cmdList->ResourceBarrier(1, &barrier);
+
+    if (m_depthState != D3D12_RESOURCE_STATE_DEPTH_WRITE)
+    {
+        auto depthBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+            m_depthStencil.Get(),
+            m_depthState,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        m_cmdList->ResourceBarrier(1, &depthBarrier);
+        m_depthState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
 }
 
 void Renderer::EndFrame()
@@ -282,13 +301,27 @@ void Renderer::EndFrame()
         D3D12_RESOURCE_STATE_RENDER_TARGET,
         D3D12_RESOURCE_STATE_PRESENT);
     m_cmdList->ResourceBarrier(1, &barrier);
-    m_cmdList->Close();
+    ThrowIfFailedRenderer(m_cmdList->Close());
 
     ID3D12CommandList* lists[] = { m_cmdList.Get() };
     m_cmdQueue->ExecuteCommandLists(1, lists);
     m_swapChain->Present(1, 0);
 
     MoveToNextFrame();
+}
+
+
+void Renderer::TransitionDepthToShaderResource()
+{
+    if (m_depthState == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+        return;
+
+    auto depthBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_depthStencil.Get(),
+        m_depthState,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_cmdList->ResourceBarrier(1, &depthBarrier);
+    m_depthState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 }
 
 void Renderer::CreateBuffer(const void* data, UINT size, ID3D12Resource** resource)
@@ -343,6 +376,7 @@ void Renderer::OnResize(int width, int height)
     for (UINT i = 0; i < _countof(m_renderTargets); ++i)
         m_renderTargets[i].Reset();
     m_depthStencil.Reset();
+    m_depthState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
     ThrowIfFailedRenderer(m_swapChain->ResizeBuffers(
         _countof(m_renderTargets),

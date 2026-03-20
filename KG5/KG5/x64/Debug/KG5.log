@@ -1,2 +1,8 @@
 ﻿  Renderer.cpp
-  KG5.vcxproj -> E:\_Projects\VS Projects\LAB1\KG5\x64\Debug\KG5.exe
+  RenderingSystem.cpp
+  main.cpp
+E:\_Projects\VS Projects\CG_Lab5\KG5\Timer.h(10,35): warning C4244: return: преобразование "const double" в "float", возможна потеря данных
+  (компиляция исходного файла "main.cpp")
+  
+  Создание кода...
+  KG5.vcxproj -> E:\_Projects\VS Projects\CG_Lab5\KG5\x64\Debug\KG5.exe
