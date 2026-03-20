@@ -1043,3 +1043,23 @@ dkms.conf
 *.uf2
 # Raspberry Pi Pico disassembler file
 *.dis
+
+# Visual Studio / build
+.vs/
+x64/
+Debug/
+Release/
+*.obj
+*.log
+*.ilk
+*.pdb
+*.idb
+*.tlog
+*.exe.recipe
+*.lastbuildstate
+*.vcxproj.user
+
+# Optional
+*.ipch
+*.sdf
+*.opensdf
