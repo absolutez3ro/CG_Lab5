@@ -2,7 +2,7 @@
 #define LIGHTING_CONTRACT_HLSLI
 
 // MUST MATCH LightingContract.h.
-#define MAX_POINT_LIGHTS 8
+#define MAX_POINT_LIGHTS 1024
 #define MAX_SPOT_LIGHTS 3
 
 struct DirectionalLightData
@@ -50,7 +50,6 @@ struct LightingFrameConstants
 
 struct LocalLightConstants
 {
-    PointLightData PointLights[MAX_POINT_LIGHTS];
     SpotLightData SpotLights[MAX_SPOT_LIGHTS];
 };
 

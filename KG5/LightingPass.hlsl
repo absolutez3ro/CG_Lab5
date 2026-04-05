@@ -6,6 +6,7 @@ Texture2D gAlbedoTex   : register(t0);
 Texture2D gNormalTex   : register(t1);
 Texture2D gMaterialTex : register(t2);
 Texture2D gDepthTex    : register(t3);
+StructuredBuffer<PointLightData> gPointLights : register(t4);
 SamplerState gSampler  : register(s0);
 
 cbuffer LightingFrameCB : register(b0)
@@ -97,15 +98,16 @@ float3 EvaluatePointLights(SurfaceData s)
     float3 sum = 0.0f;
     for (uint i = 0; i < min(gFrame.PointLightCount, MAX_POINT_LIGHTS); ++i)
     {
-        float3 lightVec = gLocalLights.PointLights[i].Position - s.WorldPos;
+        PointLightData light = gPointLights[i];
+        float3 lightVec = light.Position - s.WorldPos;
         float dist = length(lightVec);
-        if (dist > gLocalLights.PointLights[i].Range || dist <= 1e-4f)
+        if (dist > light.Range || dist <= 1e-4f)
             continue;
 
         float3 L = lightVec / dist;
-        float attenuation = max(ComputeRangeAttenuation(dist, gLocalLights.PointLights[i].Range), 0.0f);
+        float attenuation = max(ComputeRangeAttenuation(dist, light.Range), 0.0f);
         float3 brdf = ComputeBlinnPhong(normalize(s.Normal), normalize(s.ViewDir), L, s.Albedo, s.SpecColor, s.SpecPower);
-        sum += brdf * gLocalLights.PointLights[i].Color * (gLocalLights.PointLights[i].Intensity * attenuation);
+        sum += brdf * light.Color * (light.Intensity * attenuation);
     }
     return sum;
 }
@@ -157,7 +159,7 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
     if (!s.HasSurface)
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-    if (gFrame.DebugMode == 6 || gFrame.DebugMode == 7)
+    if (gFrame.DebugMode == 6 || gFrame.DebugMode == 7 || gFrame.DebugMode == 8)
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
     float3 directional = EvaluateDirectionalLight(s);
@@ -176,7 +178,7 @@ float4 PSLocalLights(VSFullscreenOutput pin) : SV_Target
     float3 pointContribution = EvaluatePointLights(s);
     float3 spotContribution = EvaluateSpotLights(s);
 
-    if (gFrame.DebugMode == 6)
+    if (gFrame.DebugMode == 6 || gFrame.DebugMode == 8)
         return float4(pointContribution, 1.0f);
 
     if (gFrame.DebugMode == 7)

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <algorithm>
+#include <cstdio>
 
 using namespace DirectX;
 
@@ -11,6 +12,21 @@ static void RS_ThrowIfFailed(HRESULT hr)
 {
     if (FAILED(hr)) throw std::runtime_error("RenderingSystem DX call failed");
 }
+
+static float RS_Lerp(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
+
+struct alignas(256) RainProxyFrameConstants
+{
+    XMFLOAT4X4 View;
+    XMFLOAT4X4 Proj;
+    XMFLOAT4 CameraRightAndRadius;
+    XMFLOAT4 CameraUpAndSoftness;
+    UINT PointLightCount = 0;
+    XMFLOAT3 Padding = { 0.0f, 0.0f, 0.0f };
+};
 
 bool RenderingSystem::Init(HWND hwnd, int width, int height)
 {
@@ -48,6 +64,35 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     m_renderer.CreateBuffer(nullptr, sizeof(GeometryFrameConstants), &m_geometryFrameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LightingFrameConstants), &m_frameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LocalLightConstants), &m_localLightsCB);
+    m_renderer.CreateBuffer(nullptr, sizeof(RainProxyFrameConstants), &m_rainProxyFrameCB);
+
+    const UINT pointLightsBufferSize = static_cast<UINT>(sizeof(LightingContract::PointLightData) * LightingContract::MaxPointLights);
+    m_renderer.CreateBuffer(nullptr, pointLightsBufferSize, &m_pointLightsUploadBuffer);
+
+    auto defaultHeapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(pointLightsBufferSize);
+    RS_ThrowIfFailed(m_renderer.GetDevice()->CreateCommittedResource(
+        &defaultHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &bufferDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_pointLightsDefaultBuffer)));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC pointLightsSrvDesc{};
+    pointLightsSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    pointLightsSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    pointLightsSrvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    pointLightsSrvDesc.Buffer.FirstElement = 0;
+    pointLightsSrvDesc.Buffer.NumElements = LightingContract::MaxPointLights;
+    pointLightsSrvDesc.Buffer.StructureByteStride = sizeof(LightingContract::PointLightData);
+    pointLightsSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE pointLightsSrvCpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+        m_renderer.GetSrvHeap()->GetCPUDescriptorHandleForHeapStart(),
+        PointLightsSrvIndex,
+        m_renderer.GetSrvDescriptorSize());
+    m_renderer.GetDevice()->CreateShaderResourceView(m_pointLightsDefaultBuffer.Get(), &pointLightsSrvDesc, pointLightsSrvCpuHandle);
 
     m_initialized = true;
     return true;
@@ -61,9 +106,16 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'D') m_moveRight = true;
 
     // Debug modes:
-    // 0=Final, 1=Albedo, 2=Normal, 3=Material, 4=Depth,
-    // 5=Lighting only, 6=Point only, 7=Spot only.
-    if (key >= '0' && key <= '7')
+    // 0=Final
+    // 1=Albedo
+    // 2=Normal
+    // 3=Material
+    // 4=Depth
+    // 5=Lighting only
+    // 6=Point lights only (all active point lights)
+    // 7=Spot lights only
+    // 8=Rain point lights debug (alias of point-only for explicit QA)
+    if (key >= '0' && key <= '8')
         m_debugMode = static_cast<UINT>(key - '0');
 }
 
@@ -227,7 +279,7 @@ void RenderingSystem::CreateRootSignatures()
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsConstantBufferView(0); // LightingFrameConstants
@@ -251,6 +303,26 @@ void RenderingSystem::CreateRootSignatures()
         ComPtr<ID3DBlob> serialized, errors;
         RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_lightingLocalRS)));
+    }
+
+    {
+        CD3DX12_DESCRIPTOR_RANGE srvRange;
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+        CD3DX12_ROOT_PARAMETER params[2];
+        params[0].InitAsConstantBufferView(0); // RainProxyFrameConstants
+        params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_VERTEX);
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(
+            2,
+            params,
+            0,
+            nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serialized, errors;
+        RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_rainProxyRS)));
     }
 }
 
@@ -290,6 +362,7 @@ void RenderingSystem::CreatePSOs()
     compileShader(L"GeometryPass.hlsl", "VSMain", "vs_5_0", m_geoVS);
     compileShader(L"GeometryPass.hlsl", "PSMain", "ps_5_0", m_geoPS);
     compileShader(L"LightingPass.hlsl", "VSFullscreen", "vs_5_0", m_lightFullscreenVS);
+    compileShader(L"RainLightProxy.hlsl", "VSProxy", "vs_5_0", m_rainProxyVS);
 
     D3D12_INPUT_ELEMENT_DESC geoLayout[] =
     {
@@ -353,25 +426,45 @@ void RenderingSystem::CreatePSOs()
 
     makeFullscreenLightingPso("PSDirectional", false, m_lightingDirectionalRS.Get(), m_psoDirectional);
     makeFullscreenLightingPso("PSLocalLights", true, m_lightingLocalRS.Get(), m_psoLocal);
+
+    {
+        ComPtr<ID3DBlob> proxyPsBlob;
+        compileShader(L"RainLightProxy.hlsl", "PSProxy", "ps_5_0", proxyPsBlob);
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC proxyDesc{};
+        proxyDesc.InputLayout = { nullptr, 0 };
+        proxyDesc.pRootSignature = m_rainProxyRS.Get();
+        proxyDesc.VS = { m_rainProxyVS->GetBufferPointer(), m_rainProxyVS->GetBufferSize() };
+        proxyDesc.PS = { proxyPsBlob->GetBufferPointer(), proxyPsBlob->GetBufferSize() };
+        proxyDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        proxyDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        proxyDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        proxyDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+        proxyDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+        proxyDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        proxyDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        proxyDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+        proxyDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        proxyDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        proxyDesc.DepthStencilState.DepthEnable = FALSE;
+        proxyDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        proxyDesc.SampleMask = UINT_MAX;
+        proxyDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        proxyDesc.NumRenderTargets = 1;
+        proxyDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        proxyDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        proxyDesc.SampleDesc.Count = 1;
+
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&proxyDesc, IID_PPV_ARGS(&m_psoRainProxy)));
+    }
 }
 
 void RenderingSystem::SetupSceneLights()
 {
-    m_pointLights.fill(LightingContract::PointLightData{});
-    m_spotLights.fill(LightingContract::SpotLightData{});
-    m_activePointLights = 0;
-    m_activeSpotLights = 0;
+    InitializeRainLightSystem();
 
-    auto setPointLight = [this](size_t index, const LightingContract::PointLightData& light)
-    {
-        if (index < m_pointLights.size())
-        {
-            m_pointLights[index] = light;
-            const UINT usedCount = static_cast<UINT>(index + 1);
-            if (usedCount > m_activePointLights)
-                m_activePointLights = usedCount;
-        }
-    };
+    m_spotLights.fill(LightingContract::SpotLightData{});
+    m_activeSpotLights = 0;
 
     auto setSpotLight = [this](size_t index, const LightingContract::SpotLightData& light)
     {
@@ -383,15 +476,6 @@ void RenderingSystem::SetupSceneLights()
                 m_activeSpotLights = usedCount;
         }
     };
-
-    setPointLight(0, LightingContract::PointLightData{ XMFLOAT3(-620.f, 130.f, -520.f), 520.f, XMFLOAT3(1.00f, 0.25f, 0.20f), 2.20f });
-    setPointLight(1, LightingContract::PointLightData{ XMFLOAT3(-620.f, 135.f, 520.f), 520.f, XMFLOAT3(0.20f, 0.55f, 1.00f), 2.20f });
-    setPointLight(2, LightingContract::PointLightData{ XMFLOAT3(-260.f, 135.f, -40.f), 500.f, XMFLOAT3(1.00f, 0.72f, 0.20f), 2.10f });
-    setPointLight(3, LightingContract::PointLightData{ XMFLOAT3(-120.f, 145.f, 760.f), 520.f, XMFLOAT3(0.20f, 0.95f, 1.00f), 2.20f });
-    setPointLight(4, LightingContract::PointLightData{ XMFLOAT3(620.f, 130.f, -520.f), 520.f, XMFLOAT3(0.30f, 1.00f, 0.35f), 2.20f });
-    setPointLight(5, LightingContract::PointLightData{ XMFLOAT3(620.f, 135.f, 520.f), 520.f, XMFLOAT3(1.00f, 0.92f, 0.30f), 2.20f });
-    setPointLight(6, LightingContract::PointLightData{ XMFLOAT3(260.f, 135.f, -40.f), 500.f, XMFLOAT3(0.95f, 0.35f, 1.00f), 2.10f });
-    setPointLight(7, LightingContract::PointLightData{ XMFLOAT3(120.f, 145.f, 760.f), 520.f, XMFLOAT3(1.00f, 0.88f, 0.80f), 2.20f });
 
     LightingContract::SpotLightData leftSpot{};
     leftSpot.Position = XMFLOAT3(-760.f, 430.f, -180.f);
@@ -422,6 +506,182 @@ void RenderingSystem::SetupSceneLights()
     backSpot.OuterCos = 0.78f;
     backSpot.Intensity = 2.20f;
     setSpotLight(2, backSpot);
+}
+
+void RenderingSystem::InitializeRainLightSystem()
+{
+    m_fallingRainLights.clear();
+    m_groundedRainLights.clear();
+
+    m_activePointLightsForGpu.clear();
+    m_activePointLightsForGpu.reserve(LightingContract::MaxPointLights);
+    m_activePointLights = 0;
+
+    m_rainSpawnAccumulator = 0.0f;
+    m_rainNextSpawnIndex = 1;
+    m_rainDebugStats = RainDebugStats{};
+    m_rainDebugFrameCounter = 0;
+}
+
+RenderingSystem::RainPointLight RenderingSystem::GenerateRainLightParameters()
+{
+    RainPointLight light{};
+
+    // Recommended cold palette for rain lights:
+    // cyan/blue/violet only, with no warm yellow tones.
+    static constexpr XMFLOAT3 palette[] =
+    {
+        XMFLOAT3(0.25f, 0.60f, 1.00f), // cold blue
+        XMFLOAT3(0.20f, 0.85f, 1.00f), // cyan
+        XMFLOAT3(0.35f, 0.50f, 1.00f), // azure
+        XMFLOAT3(0.55f, 0.40f, 0.95f), // violet
+        XMFLOAT3(0.45f, 0.70f, 1.00f), // icy blue
+    };
+
+    const size_t paletteCount = std::size(palette);
+    const float selector = m_rainUnitDist(m_rainRng) * static_cast<float>(paletteCount - 1);
+    const size_t idxA = static_cast<size_t>(selector);
+    const size_t idxB = (std::min)(idxA + 1, paletteCount - 1);
+    const float t = selector - static_cast<float>(idxA);
+
+    light.Color = XMFLOAT3(
+        RS_Lerp(palette[idxA].x, palette[idxB].x, t),
+        RS_Lerp(palette[idxA].y, palette[idxB].y, t),
+        RS_Lerp(palette[idxA].z, palette[idxB].z, t));
+
+    // Keep actual lighting contribution moderate to avoid full-scene overexposure.
+    // Visual readability is handled mostly by the proxy pass.
+    light.Range = RS_Lerp(m_rainLightRangeMin, m_rainLightRangeMax, m_rainUnitDist(m_rainRng));
+    light.Intensity = RS_Lerp(m_rainLightIntensityMin, m_rainLightIntensityMax, m_rainUnitDist(m_rainRng));
+
+    // Jitter keeps motion organic while preserving overall rain density.
+    const float speedJitter = RS_Lerp(-16.0f, 16.0f, m_rainUnitDist(m_rainRng));
+    light.Velocity = XMFLOAT3(0.0f, -(m_rainFallSpeed + speedJitter), 0.0f);
+
+    return light;
+}
+
+void RenderingSystem::SpawnRainLight()
+{
+    if (m_fallingRainLights.size() >= static_cast<size_t>(m_rainMaxFallingLights))
+        return;
+
+    RainPointLight light = GenerateRainLightParameters();
+    light.Position.x = RS_Lerp(m_rainSpawnMinXZ.x, m_rainSpawnMaxXZ.x, m_rainUnitDist(m_rainRng));
+    light.Position.y = m_rainSpawnY;
+    light.Position.z = RS_Lerp(m_rainSpawnMinXZ.y, m_rainSpawnMaxXZ.y, m_rainUnitDist(m_rainRng));
+
+    light.Landed = false;
+    light.SpawnIndex = m_rainNextSpawnIndex++;
+
+    m_fallingRainLights.push_back(light);
+}
+
+void RenderingSystem::TrimGroundedLightsIfNeeded()
+{
+    const size_t minKeep = static_cast<size_t>(m_rainMinGroundedLights);
+    const size_t maxKeep = static_cast<size_t>((std::max)(m_rainMaxGroundedLights, m_rainMinGroundedLights));
+
+    m_rainDebugStats.GroundedTrimmedThisFrame = 0;
+
+    // Keep at least the guaranteed floor pool, but trim oldest once we exceed upper bound.
+    while (m_groundedRainLights.size() > maxKeep && m_groundedRainLights.size() > minKeep)
+    {
+        m_groundedRainLights.pop_front();
+        ++m_rainDebugStats.GroundedTrimmedThisFrame;
+    }
+}
+
+void RenderingSystem::UpdateRainLights(float dt)
+{
+    if (dt <= 0.0f)
+        return;
+
+    m_rainSpawnAccumulator += dt;
+    while (m_rainSpawnAccumulator >= m_rainSpawnInterval)
+    {
+        m_rainSpawnAccumulator -= m_rainSpawnInterval;
+        SpawnRainLight();
+    }
+
+    std::deque<RainPointLight> stillFalling;
+    stillFalling.clear();
+
+    for (RainPointLight& light : m_fallingRainLights)
+    {
+        light.Position.y += light.Velocity.y * dt;
+
+        if (light.Position.y <= m_rainFloorY)
+        {
+            light.Position.y = m_rainFloorY;
+            light.Velocity = XMFLOAT3(0.0f, 0.0f, 0.0f);
+            light.Landed = true;
+            m_groundedRainLights.push_back(light);
+        }
+        else
+        {
+            stillFalling.push_back(light);
+        }
+    }
+
+    m_fallingRainLights.swap(stillFalling);
+    TrimGroundedLightsIfNeeded();
+}
+
+void RenderingSystem::BuildActivePointLightsForGpu()
+{
+    m_activePointLightsForGpu.clear();
+
+    const size_t maxForGpu = static_cast<size_t>((std::min)(m_rainMaxRenderablePointLights, LightingContract::MaxPointLights));
+    const size_t reservedFalling = static_cast<size_t>((std::min)(m_rainReservedRenderableFallingLights, m_rainMaxFallingLights));
+
+    auto appendLight = [this, maxForGpu](const RainPointLight& rain)
+    {
+        if (m_activePointLightsForGpu.size() >= maxForGpu)
+            return;
+
+        LightingContract::PointLightData gpuLight{};
+        gpuLight.Position = rain.Position;
+        gpuLight.Range = rain.Range;
+        gpuLight.Color = rain.Color;
+        gpuLight.Intensity = rain.Intensity;
+        m_activePointLightsForGpu.push_back(gpuLight);
+    };
+
+    // Keep descending lights visibly active even with a large grounded pool.
+    size_t fallingRendered = 0;
+    for (const RainPointLight& falling : m_fallingRainLights)
+    {
+        if (fallingRendered >= reservedFalling)
+            break;
+
+        appendLight(falling);
+        ++fallingRendered;
+    }
+
+    for (const RainPointLight& grounded : m_groundedRainLights)
+    {
+        appendLight(grounded);
+    }
+
+    // Use any remaining GPU budget for additional falling lights.
+    for (size_t i = fallingRendered; i < m_fallingRainLights.size(); ++i)
+    {
+        appendLight(m_fallingRainLights[i]);
+    }
+
+    m_activePointLights = static_cast<UINT>(m_activePointLightsForGpu.size());
+
+    m_rainDebugStats.FallingCount = static_cast<UINT>(m_fallingRainLights.size());
+    m_rainDebugStats.GroundedCount = static_cast<UINT>(m_groundedRainLights.size());
+    m_rainDebugStats.TotalSimulatedCount = m_rainDebugStats.FallingCount + m_rainDebugStats.GroundedCount;
+    m_rainDebugStats.TotalSelectedForGpu = m_activePointLights;
+
+    const size_t selected = m_activePointLightsForGpu.size();
+    const size_t simulated = m_fallingRainLights.size() + m_groundedRainLights.size();
+    m_rainDebugStats.ClippedDuringGpuSelection = (simulated > selected)
+        ? static_cast<UINT>(simulated - selected)
+        : 0;
 }
 
 void RenderingSystem::GeometryPass()
@@ -537,7 +797,7 @@ void RenderingSystem::UpdateFrameConstants()
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
     XMStoreFloat4x4(&cb.InvViewProj, XMMatrixTranspose(invViewProj));
 
-    cb.PointLightCount = m_activePointLights;
+    cb.PointLightCount = (std::min)(m_activePointLights, LightingContract::MaxPointLights);
     cb.SpotLightCount = m_activeSpotLights;
     cb.DebugMode = m_debugMode;
 
@@ -550,11 +810,6 @@ void RenderingSystem::UpdateFrameConstants()
 void RenderingSystem::UpdateLocalLightConstants()
 {
     LightingContract::LocalLightConstants lights{};
-
-    for (UINT i = 0; i < m_activePointLights; ++i)
-    {
-        lights.PointLights[i] = m_pointLights[i];
-    }
 
     for (UINT i = 0; i < m_activeSpotLights; ++i)
     {
@@ -571,6 +826,59 @@ void RenderingSystem::UpdateLocalLightConstants()
     m_localLightsCB->Map(0, nullptr, &mapped);
     memcpy(mapped, &lights, sizeof(lights));
     m_localLightsCB->Unmap(0, nullptr);
+}
+
+
+void RenderingSystem::UploadPointLightsToGpu()
+{
+    const UINT clampedPointLightCount = static_cast<UINT>((std::min)(
+        m_activePointLightsForGpu.size(),
+        static_cast<size_t>(LightingContract::MaxPointLights)));
+    const UINT pointLightDataSize = static_cast<UINT>(sizeof(LightingContract::PointLightData) * clampedPointLightCount);
+
+    if (pointLightDataSize > 0)
+    {
+        void* mapped = nullptr;
+        m_pointLightsUploadBuffer->Map(0, nullptr, &mapped);
+        memcpy(mapped, m_activePointLightsForGpu.data(), pointLightDataSize);
+        m_pointLightsUploadBuffer->Unmap(0, nullptr);
+    }
+
+    m_activePointLights = clampedPointLightCount;
+    m_rainDebugStats.TotalUploadedToGpu = clampedPointLightCount;
+    m_rainDebugStats.ClippedDuringGpuUpload = (m_activePointLightsForGpu.size() > clampedPointLightCount)
+        ? static_cast<UINT>(m_activePointLightsForGpu.size() - clampedPointLightCount)
+        : 0;
+
+    auto cmdList = m_renderer.GetCmdList();
+
+    auto toCopyDest = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_pointLightsDefaultBuffer.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+    auto toShaderResource = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_pointLightsDefaultBuffer.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    static bool initializedForShaderRead = false;
+    if (initializedForShaderRead)
+    {
+        cmdList->ResourceBarrier(1, &toCopyDest);
+    }
+
+    if (pointLightDataSize > 0)
+    {
+        cmdList->CopyBufferRegion(
+            m_pointLightsDefaultBuffer.Get(),
+            0,
+            m_pointLightsUploadBuffer.Get(),
+            0,
+            pointLightDataSize);
+    }
+
+    cmdList->ResourceBarrier(1, &toShaderResource);
+    initializedForShaderRead = true;
 }
 
 void RenderingSystem::LightingPassDirectional()
@@ -612,10 +920,60 @@ void RenderingSystem::LightingPassLocal()
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
+void RenderingSystem::RainLightProxyPass()
+{
+    if (m_activePointLights == 0)
+    {
+        m_rainDebugStats.TotalVisibleProxiesRendered = 0;
+        return;
+    }
+
+    RainProxyFrameConstants cb{};
+    cb.View = m_view;
+    cb.Proj = m_proj;
+
+    const XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    const XMVECTOR cameraRight = XMVector3Normalize(XMVectorSet(view.r[0].m128_f32[0], view.r[1].m128_f32[0], view.r[2].m128_f32[0], 0.0f));
+    const XMVECTOR cameraUp = XMVector3Normalize(XMVectorSet(view.r[0].m128_f32[1], view.r[1].m128_f32[1], view.r[2].m128_f32[1], 0.0f));
+
+    XMFLOAT3 right3{};
+    XMFLOAT3 up3{};
+    XMStoreFloat3(&right3, cameraRight);
+    XMStoreFloat3(&up3, cameraUp);
+
+    cb.CameraRightAndRadius = XMFLOAT4(right3.x, right3.y, right3.z, m_rainProxyRadius);
+    cb.CameraUpAndSoftness = XMFLOAT4(up3.x, up3.y, up3.z, m_rainProxySoftness);
+    cb.PointLightCount = m_activePointLights;
+
+    void* mapped = nullptr;
+    m_rainProxyFrameCB->Map(0, nullptr, &mapped);
+    memcpy(mapped, &cb, sizeof(cb));
+    m_rainProxyFrameCB->Unmap(0, nullptr);
+
+    auto cmdList = m_renderer.GetCmdList();
+    auto rtv = m_renderer.GetBackBufferRtv();
+
+    cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    cmdList->SetGraphicsRootSignature(m_rainProxyRS.Get());
+    cmdList->SetPipelineState(m_psoRainProxy.Get());
+
+    ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    cmdList->SetGraphicsRootConstantBufferView(0, m_rainProxyFrameCB->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootDescriptorTable(1, m_renderer.GetSrvGpuHandle(PointLightsSrvIndex));
+
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(6, m_activePointLights, 0, 0);
+    m_rainDebugStats.TotalVisibleProxiesRendered = m_activePointLights;
+}
+
 void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 {
     (void)totalTime;
     UpdateCamera(deltaTime);
+    UpdateRainLights(deltaTime);
+    BuildActivePointLightsForGpu();
 
     auto cmdList = m_renderer.GetCmdList();
 
@@ -628,13 +986,42 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
     UpdateFrameConstants();
     UpdateLocalLightConstants();
+    UploadPointLightsToGpu();
 
     LightingPassDirectional();
 
     // Local lights are only needed in final and lighting debug modes.
-    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 7)
+    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 7 || m_debugMode == 8)
     {
         LightingPassLocal();
+    }
+
+    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 8)
+    {
+        RainLightProxyPass();
+    }
+
+    if (m_rainDebugOutputEnabled)
+    {
+        ++m_rainDebugFrameCounter;
+        if (m_rainDebugFrameCounter % (std::max)(1u, m_rainDebugOutputIntervalFrames) == 0)
+        {
+            char msg[512];
+            std::snprintf(
+                msg,
+                sizeof(msg),
+                "[RainDebug] falling=%u grounded=%u simulated=%u selectedGPU=%u uploadedGPU=%u proxies=%u clipSelect=%u clipUpload=%u groundedTrim=%u\n",
+                m_rainDebugStats.FallingCount,
+                m_rainDebugStats.GroundedCount,
+                m_rainDebugStats.TotalSimulatedCount,
+                m_rainDebugStats.TotalSelectedForGpu,
+                m_rainDebugStats.TotalUploadedToGpu,
+                m_rainDebugStats.TotalVisibleProxiesRendered,
+                m_rainDebugStats.ClippedDuringGpuSelection,
+                m_rainDebugStats.ClippedDuringGpuUpload,
+                m_rainDebugStats.GroundedTrimmedThisFrame);
+            OutputDebugStringA(msg);
+        }
     }
 }
 

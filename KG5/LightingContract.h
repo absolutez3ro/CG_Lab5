@@ -6,7 +6,7 @@ using namespace DirectX;
 namespace LightingContract
 {
     // MUST MATCH LightingContract.hlsli
-    constexpr UINT MaxPointLights = 8;
+    constexpr UINT MaxPointLights = 1024;
     constexpr UINT MaxSpotLights = 3;
 
     struct alignas(16) DirectionalLightData
@@ -54,7 +54,6 @@ namespace LightingContract
 
     struct alignas(256) LocalLightConstants
     {
-        PointLightData PointLights[MaxPointLights];
         SpotLightData SpotLights[MaxSpotLights];
     };
 
