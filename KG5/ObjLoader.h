@@ -12,6 +12,8 @@ struct Material
 	XMFLOAT4 specular = { 0.5f, 0.5f, 0.5f, 1.f };
 	float shininess = 32.f;
 	std::string diffuseTexture;
+	std::string normalTexture;
+	std::string displacementTexture;
 };
 struct MeshSubset
 {
@@ -26,6 +28,8 @@ struct ObjMesh
 		XMFLOAT3 Position;
 		XMFLOAT3 Normal;
 		XMFLOAT2 TexCoord;
+		XMFLOAT3 Tangent;
+		XMFLOAT3 Bitangent;
 	};
 	std::vector<Vertex> vertices;
 	std::vector<UINT> indices;

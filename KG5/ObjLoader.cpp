@@ -4,6 +4,8 @@
 #include <map>
 #include <tuple>
 #include <algorithm>
+#include <cmath>
+#include <cctype>
 // -------------------------------------------------------
 // String helpers
 // -------------------------------------------------------
@@ -39,6 +41,8 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 		std::istringstream ss(line);
 		std::string token;
 		ss >> token;
+		std::string tokenLower = token;
+		std::transform(tokenLower.begin(), tokenLower.end(), tokenLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		if (token == "newmtl")
 		{
 			Material m;
@@ -49,21 +53,21 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 		else if (curIdx >= 0)
 		{
 			Material& cur = mats[curIdx];
-			if (token == "Kd")
-			{
-				ss >> cur.diffuse.x >> cur.diffuse.y >> cur.diffuse.z;
-				cur.diffuse.w = 1.f;
-			}
-			else if (token == "Ks")
-			{
-				ss >> cur.specular.x >> cur.specular.y >> cur.specular.z;
-			}
-			else if (token == "Ns")
-			{
-				ss >> cur.shininess;
-			}
-			else if (token == "d")
-			{
+				if (tokenLower == "kd")
+				{
+					ss >> cur.diffuse.x >> cur.diffuse.y >> cur.diffuse.z;
+					cur.diffuse.w = 1.f;
+				}
+				else if (tokenLower == "ks")
+				{
+					ss >> cur.specular.x >> cur.specular.y >> cur.specular.z;
+				}
+				else if (tokenLower == "ns")
+				{
+					ss >> cur.shininess;
+				}
+				else if (tokenLower == "d")
+				{
 				// In Sponza's MTL, d=0 is incorrectly used but means opaque.
 				// Only treat as transparent if d is between 0 and 1 exclusive.
 				float d = 1.f;
@@ -71,14 +75,14 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 				// Clamp: if d==0 treat as fully opaque (Sponza quirk)
 				cur.diffuse.w = (d <= 0.f) ? 1.f : d;
 			}
-			else if (token == "Tr")
-			{
-				float tr = 0.f;
-				ss >> tr;
-				cur.diffuse.w = 1.f - tr;
-			}
-			else if (token == "map_Kd" || token == "map_Ka")
-			{
+				else if (tokenLower == "tr")
+				{
+					float tr = 0.f;
+					ss >> tr;
+					cur.diffuse.w = 1.f - tr;
+				}
+				else if (tokenLower == "map_kd" || tokenLower == "map_ka" || tokenLower == "map_bump" || tokenLower == "bump" || tokenLower == "disp" || tokenLower == "map_disp")
+				{
 				// Read rest of line (path may contain spaces)
 				std::string tex;
 				std::getline(ss, tex);
@@ -88,8 +92,13 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 				// Strip any leading "./" or ".\\"
 				if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
 					tex = tex.substr(2);
-				cur.diffuseTexture = tex;
-			}
+					if (tokenLower == "map_kd" || tokenLower == "map_ka")
+						cur.diffuseTexture = tex;
+					else if (tokenLower == "map_bump" || tokenLower == "bump")
+						cur.normalTexture = tex;
+					else
+						cur.displacementTexture = tex;
+				}
 		}
 	}
 	return true;
@@ -207,6 +216,8 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 						? uvs[tIdx] : XMFLOAT2(0, 0);
 					v.Normal = (nIdx >= 0 && nIdx < (int)normals.size())
 						? normals[nIdx] : XMFLOAT3(0, 1, 0);
+					v.Tangent = XMFLOAT3(1, 0, 0);
+					v.Bitangent = XMFLOAT3(0, 0, 1);
 					UINT newIdx = (UINT)out.vertices.size();
 					out.vertices.push_back(v);
 					vertexMap[key] = newIdx;
@@ -228,6 +239,95 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 	}
 	// Close last subset
 	CloseSubset();
+
+	// Build tangents/bitangents from indexed triangles.
+	if (!out.vertices.empty() && !out.indices.empty())
+	{
+		std::vector<XMFLOAT3> tanAccum(out.vertices.size(), XMFLOAT3(0.f, 0.f, 0.f));
+		std::vector<XMFLOAT3> bitanAccum(out.vertices.size(), XMFLOAT3(0.f, 0.f, 0.f));
+
+		for (size_t i = 0; i + 2 < out.indices.size(); i += 3)
+		{
+			const UINT i0 = out.indices[i + 0];
+			const UINT i1 = out.indices[i + 1];
+			const UINT i2 = out.indices[i + 2];
+
+			if (i0 >= out.vertices.size() || i1 >= out.vertices.size() || i2 >= out.vertices.size())
+				continue;
+
+			const ObjMesh::Vertex& v0 = out.vertices[i0];
+			const ObjMesh::Vertex& v1 = out.vertices[i1];
+			const ObjMesh::Vertex& v2 = out.vertices[i2];
+
+			const XMVECTOR p0 = XMLoadFloat3(&v0.Position);
+			const XMVECTOR p1 = XMLoadFloat3(&v1.Position);
+			const XMVECTOR p2 = XMLoadFloat3(&v2.Position);
+
+			const XMFLOAT2 uv0 = v0.TexCoord;
+			const XMFLOAT2 uv1 = v1.TexCoord;
+			const XMFLOAT2 uv2 = v2.TexCoord;
+
+			const float x1 = XMVectorGetX(p1) - XMVectorGetX(p0);
+			const float y1 = XMVectorGetY(p1) - XMVectorGetY(p0);
+			const float z1 = XMVectorGetZ(p1) - XMVectorGetZ(p0);
+			const float x2 = XMVectorGetX(p2) - XMVectorGetX(p0);
+			const float y2 = XMVectorGetY(p2) - XMVectorGetY(p0);
+			const float z2 = XMVectorGetZ(p2) - XMVectorGetZ(p0);
+
+			const float s1 = uv1.x - uv0.x;
+			const float t1 = uv1.y - uv0.y;
+			const float s2 = uv2.x - uv0.x;
+			const float t2 = uv2.y - uv0.y;
+
+			const float det = s1 * t2 - s2 * t1;
+			if (std::abs(det) < 1e-8f)
+				continue;
+
+			const float r = 1.0f / det;
+			const XMFLOAT3 triTangent(
+				(t2 * x1 - t1 * x2) * r,
+				(t2 * y1 - t1 * y2) * r,
+				(t2 * z1 - t1 * z2) * r);
+			const XMFLOAT3 triBitangent(
+				(s1 * x2 - s2 * x1) * r,
+				(s1 * y2 - s2 * y1) * r,
+				(s1 * z2 - s2 * z1) * r);
+
+			auto add = [](XMFLOAT3& a, const XMFLOAT3& b)
+			{
+				a.x += b.x; a.y += b.y; a.z += b.z;
+			};
+
+			add(tanAccum[i0], triTangent);
+			add(tanAccum[i1], triTangent);
+			add(tanAccum[i2], triTangent);
+			add(bitanAccum[i0], triBitangent);
+			add(bitanAccum[i1], triBitangent);
+			add(bitanAccum[i2], triBitangent);
+		}
+
+		for (size_t i = 0; i < out.vertices.size(); ++i)
+		{
+			const XMVECTOR n = XMVector3Normalize(XMLoadFloat3(&out.vertices[i].Normal));
+			XMVECTOR t = XMLoadFloat3(&tanAccum[i]);
+			XMVECTOR b = XMLoadFloat3(&bitanAccum[i]);
+
+			if (XMVectorGetX(XMVector3LengthSq(t)) < 1e-10f)
+				t = XMVectorSet(1.f, 0.f, 0.f, 0.f);
+
+			const XMVECTOR ntDot = XMVector3Dot(n, t);
+			t = XMVector3Normalize(XMVectorSubtract(t, XMVectorMultiply(n, ntDot)));
+
+			if (XMVectorGetX(XMVector3LengthSq(b)) < 1e-10f)
+				b = XMVector3Normalize(XMVector3Cross(n, t));
+			else
+				b = XMVector3Normalize(b);
+
+			XMStoreFloat3(&out.vertices[i].Tangent, t);
+			XMStoreFloat3(&out.vertices[i].Bitangent, b);
+		}
+	}
+
 	// Remove empty subsets
 	std::vector<MeshSubset> nonEmpty;
 	for (size_t i = 0; i < out.subsets.size(); ++i)

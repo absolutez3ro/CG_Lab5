@@ -1,6 +1,8 @@
 ﻿#include "Renderer.h"
 #include <stdexcept>
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 
 static void ThrowIfFailedRenderer(HRESULT hr)
 {
@@ -409,6 +411,8 @@ bool Renderer::LoadObj(const std::string& path)
         vv.Position = v.Position;
         vv.Normal = v.Normal;
         vv.TexCoord = v.TexCoord;
+        vv.Tangent = v.Tangent;
+        vv.Bitangent = v.Bitangent;
         verts.push_back(vv);
     }
 
@@ -422,47 +426,321 @@ bool Renderer::LoadObj(const std::string& path)
     ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
     ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
 
+    auto createSrvAt = [&](UINT heapIndex, ID3D12Resource* resource, DXGI_FORMAT format)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+            m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+            heapIndex,
+            m_cbvSrvDescSize);
+
+        m_device->CreateShaderResourceView(resource, &srvDesc, cpuHandle);
+    };
+
+    auto tryLoadTexture = [&](const std::filesystem::path& texPath,
+                              ComPtr<ID3D12Resource>& outTexture,
+                              ComPtr<ID3D12Resource>& outUpload,
+                              DXGI_FORMAT& outFormat) -> bool
+    {
+        TextureLoader::TextureData texData;
+        if (!TextureLoader::LoadFromFile(texPath.wstring(), texData))
+            return false;
+
+        if (!TextureLoader::CreateTexture(
+            m_device.Get(),
+            m_cmdList.Get(),
+            texData,
+            outTexture,
+            outUpload))
+        {
+            return false;
+        }
+
+        outFormat = texData.format;
+        return true;
+    };
+
+    auto tryLoadTextureCandidates = [&](const std::vector<std::filesystem::path>& candidates,
+                                        ComPtr<ID3D12Resource>& outTexture,
+                                        ComPtr<ID3D12Resource>& outUpload,
+                                        DXGI_FORMAT& outFormat) -> bool
+    {
+        for (const auto& candidate : candidates)
+        {
+            if (tryLoadTexture(candidate, outTexture, outUpload, outFormat))
+                return true;
+        }
+        return false;
+    };
+
+    bool hasGlobalOverrideNormal = false;
+    bool hasGlobalOverrideDisplacement = false;
+    DXGI_FORMAT globalOverrideNormalFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    DXGI_FORMAT globalOverrideDisplacementFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+    if (m_forceSponzaDiagnosticMaterialOverride)
+    {
+        m_globalOverrideNormalTexture.Reset();
+        m_globalOverrideNormalUpload.Reset();
+        m_globalOverrideDisplacementTexture.Reset();
+        m_globalOverrideDisplacementUpload.Reset();
+
+        const std::filesystem::path overrideNormalAbs = LR"(E:\_Projects\VS Projects\CG_Lab5_test\KG5\assets\N_jardinera_1_displacement_2.png)";
+        const std::filesystem::path overrideDispAbs = LR"(E:\_Projects\VS Projects\CG_Lab5_test\KG5\assets\jardinera_1_displacement_2.png)";
+
+        const std::vector<std::filesystem::path> overrideNormalCandidates = {
+            overrideNormalAbs,
+            baseDir / "N_jardinera_1_displacement_2.png",
+            baseDir / "assets" / "N_jardinera_1_displacement_2.png",
+            baseDir.parent_path() / "assets" / "N_jardinera_1_displacement_2.png"
+        };
+        const std::vector<std::filesystem::path> overrideDisplacementCandidates = {
+            overrideDispAbs,
+            baseDir / "jardinera_1_displacement_2.png",
+            baseDir / "assets" / "jardinera_1_displacement_2.png",
+            baseDir.parent_path() / "assets" / "jardinera_1_displacement_2.png"
+        };
+
+        hasGlobalOverrideNormal = tryLoadTextureCandidates(
+            overrideNormalCandidates,
+            m_globalOverrideNormalTexture,
+            m_globalOverrideNormalUpload,
+            globalOverrideNormalFormat);
+
+        hasGlobalOverrideDisplacement = tryLoadTextureCandidates(
+            overrideDisplacementCandidates,
+            m_globalOverrideDisplacementTexture,
+            m_globalOverrideDisplacementUpload,
+            globalOverrideDisplacementFormat);
+    }
+
     for (size_t i = 0; i < mesh.materials.size(); ++i)
     {
         m_gpuMaterials[i].diffuse = mesh.materials[i].diffuse;
         m_gpuMaterials[i].specular = mesh.materials[i].specular;
         m_gpuMaterials[i].specPower = mesh.materials[i].shininess;
+        m_gpuMaterials[i].hasNormalMap = false;
+        m_gpuMaterials[i].hasDisplacementMap = false;
+        m_gpuMaterials[i].displacementScale = 0.0f;
+        m_gpuMaterials[i].displacementBias = 0.0f;
 
+        if (m_nextSrvIndex + 2 >= 256)
+            continue;
+
+        const UINT diffuseSrv = m_nextSrvIndex++;
+        const UINT normalSrv = m_nextSrvIndex++;
+        const UINT displacementSrv = m_nextSrvIndex++;
+        m_gpuMaterials[i].diffuseSrvHeapIndex = static_cast<int>(diffuseSrv);
+        m_gpuMaterials[i].normalSrvHeapIndex = static_cast<int>(normalSrv);
+        m_gpuMaterials[i].displacementSrvHeapIndex = static_cast<int>(displacementSrv);
+
+        bool hasDiffuse = false;
+        DXGI_FORMAT diffuseFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
         if (!mesh.materials[i].diffuseTexture.empty())
         {
             std::filesystem::path texPath = baseDir / mesh.materials[i].diffuseTexture;
-            TextureLoader::TextureData texData;
-            if (TextureLoader::LoadFromFile(texPath.wstring(), texData))
+            if (tryLoadTexture(
+                texPath,
+                m_gpuMaterials[i].diffuseTexture,
+                m_gpuMaterials[i].diffuseTextureUpload,
+                diffuseFormat))
             {
-                if (TextureLoader::CreateTexture(
-                    m_device.Get(),
-                    m_cmdList.Get(),
-                    texData,
-                    m_gpuMaterials[i].texture,
-                    m_gpuMaterials[i].textureUpload))
-                {
-                    if (m_nextSrvIndex >= 256)
-                    {
-                        m_gpuMaterials[i].srvHeapIndex = -1;
-                        continue;
-                    }
-
-                    m_gpuMaterials[i].srvHeapIndex = static_cast<int>(m_nextSrvIndex++);
-                    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                    srvDesc.Format = texData.format;
-                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                    srvDesc.Texture2D.MipLevels = 1;
-
-                    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
-                        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
-                        m_gpuMaterials[i].srvHeapIndex,
-                        m_cbvSrvDescSize);
-
-                    m_device->CreateShaderResourceView(m_gpuMaterials[i].texture.Get(), &srvDesc, cpuHandle);
-                }
+                hasDiffuse = true;
             }
         }
+
+        createSrvAt(
+            diffuseSrv,
+            hasDiffuse ? m_gpuMaterials[i].diffuseTexture.Get() : m_defaultWhiteTexture.Get(),
+            hasDiffuse ? diffuseFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        auto toLowerCopy = [](std::string value) -> std::string
+        {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return value;
+        };
+
+        auto looksLikeNormalMapName = [&](const std::string& s) -> bool
+        {
+            const std::string lower = toLowerCopy(s);
+            return lower.find("_ddn") != std::string::npos ||
+                lower.find("_nrm") != std::string::npos ||
+                lower.find("_normal") != std::string::npos ||
+                lower.find("normal") != std::string::npos;
+        };
+
+        auto looksLikeDisplacementMapName = [&](const std::string& s) -> bool
+        {
+            const std::string lower = toLowerCopy(s);
+            return lower.find("_disp") != std::string::npos ||
+                lower.find("_displacement") != std::string::npos ||
+                lower.find("_height") != std::string::npos ||
+                lower.find("displacement") != std::string::npos ||
+                lower.find("height") != std::string::npos;
+        };
+
+        bool hasNormal = false;
+        DXGI_FORMAT normalFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        {
+            if (m_forceSponzaDiagnosticMaterialOverride && hasGlobalOverrideNormal)
+            {
+                hasNormal = true;
+                normalFormat = globalOverrideNormalFormat;
+                m_gpuMaterials[i].normalTexture = m_globalOverrideNormalTexture;
+                m_gpuMaterials[i].normalTextureUpload = m_globalOverrideNormalUpload;
+                m_gpuMaterials[i].hasNormalMap = true;
+            }
+
+            std::vector<std::filesystem::path> normalCandidates;
+
+            if (!hasNormal && !mesh.materials[i].normalTexture.empty())
+            {
+                const std::filesystem::path normalRel(mesh.materials[i].normalTexture);
+                if (!looksLikeDisplacementMapName(normalRel.stem().string()))
+                    normalCandidates.push_back(baseDir / normalRel);
+            }
+
+            if (!hasNormal && !mesh.materials[i].diffuseTexture.empty())
+            {
+                std::filesystem::path diffuseRel(mesh.materials[i].diffuseTexture);
+                std::string diffuseStem = diffuseRel.stem().string();
+                const std::string diffuseExt = diffuseRel.extension().string();
+                const std::filesystem::path diffuseParent = diffuseRel.parent_path();
+
+                auto pushNormalCandidate = [&](const std::string& stemName)
+                {
+                    if (stemName.empty())
+                        return;
+                    normalCandidates.push_back(baseDir / (diffuseParent / (stemName + diffuseExt)));
+                };
+
+                pushNormalCandidate(diffuseStem + "_ddn");
+
+                const size_t diffPos = diffuseStem.find("_diff");
+                if (diffPos != std::string::npos)
+                {
+                    std::string replaced = diffuseStem;
+                    replaced.replace(diffPos, 5, "_ddn");
+                    pushNormalCandidate(replaced);
+                }
+
+                const size_t difPos = diffuseStem.find("_dif");
+                if (difPos != std::string::npos)
+                {
+                    std::string replaced = diffuseStem;
+                    replaced.replace(difPos, 4, "_ddn");
+                    pushNormalCandidate(replaced);
+                }
+            }
+
+            if (!hasNormal && tryLoadTextureCandidates(
+                normalCandidates,
+                m_gpuMaterials[i].normalTexture,
+                m_gpuMaterials[i].normalTextureUpload,
+                normalFormat))
+            {
+                hasNormal = true;
+                m_gpuMaterials[i].hasNormalMap = true;
+            }
+        }
+
+        createSrvAt(
+            normalSrv,
+            hasNormal ? m_gpuMaterials[i].normalTexture.Get() : m_defaultWhiteTexture.Get(),
+            hasNormal ? normalFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        bool hasDisplacement = false;
+        DXGI_FORMAT displacementFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        {
+            if (m_forceSponzaDiagnosticMaterialOverride && hasGlobalOverrideDisplacement)
+            {
+                hasDisplacement = true;
+                displacementFormat = globalOverrideDisplacementFormat;
+                m_gpuMaterials[i].displacementTexture = m_globalOverrideDisplacementTexture;
+                m_gpuMaterials[i].displacementTextureUpload = m_globalOverrideDisplacementUpload;
+                m_gpuMaterials[i].displacementScale = 1.5f;
+                m_gpuMaterials[i].displacementBias = -0.06f;
+                m_gpuMaterials[i].hasDisplacementMap = true;
+            }
+
+            std::vector<std::filesystem::path> displacementCandidates;
+
+            if (!hasDisplacement && !mesh.materials[i].displacementTexture.empty())
+            {
+                std::filesystem::path dispRel(mesh.materials[i].displacementTexture);
+                if (!looksLikeNormalMapName(dispRel.stem().string()))
+                {
+                    displacementCandidates.push_back(baseDir / dispRel);
+                }
+            }
+
+            if (!hasDisplacement && !mesh.materials[i].diffuseTexture.empty())
+            {
+                std::filesystem::path diffuseRel(mesh.materials[i].diffuseTexture);
+                std::string diffuseStem = diffuseRel.stem().string();
+                const std::string diffuseExt = diffuseRel.extension().string();
+                const std::filesystem::path diffuseParent = diffuseRel.parent_path();
+
+                auto pushDisplacementCandidate = [&](const std::string& stemName)
+                {
+                    if (stemName.empty())
+                        return;
+                    displacementCandidates.push_back(baseDir / (diffuseParent / (stemName + diffuseExt)));
+                };
+
+                const size_t diffPos = diffuseStem.find("_diff");
+                if (diffPos != std::string::npos)
+                {
+                    std::string replaced = diffuseStem;
+                    replaced.replace(diffPos, 5, "_disp");
+                    pushDisplacementCandidate(replaced);
+                }
+
+                const size_t difPos = diffuseStem.find("_dif");
+                if (difPos != std::string::npos)
+                {
+                    std::string replaced = diffuseStem;
+                    replaced.replace(difPos, 4, "_disp");
+                    pushDisplacementCandidate(replaced);
+                }
+
+                pushDisplacementCandidate(diffuseStem + "_disp");
+                pushDisplacementCandidate(diffuseStem + "_displacement");
+                pushDisplacementCandidate(diffuseStem + "_height");
+            }
+
+            // Fallback only for column-like materials (does not override whole scene).
+            std::string materialKey = mesh.materials[i].name + "|" + mesh.materials[i].diffuseTexture;
+            std::string materialKeyLower = materialKey;
+            std::transform(materialKeyLower.begin(), materialKeyLower.end(), materialKeyLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!hasDisplacement && materialKeyLower.find("column") != std::string::npos)
+            {
+                displacementCandidates.push_back(baseDir.parent_path() / "column_a_displacement_3_inv.png");
+                displacementCandidates.push_back(baseDir / "column_a_displacement_3_inv.png");
+            }
+
+            if (!hasDisplacement && tryLoadTextureCandidates(
+                displacementCandidates,
+                m_gpuMaterials[i].displacementTexture,
+                m_gpuMaterials[i].displacementTextureUpload,
+                displacementFormat))
+            {
+                hasDisplacement = true;
+                m_gpuMaterials[i].displacementScale = 1.5f;
+                m_gpuMaterials[i].displacementBias = -0.06f;
+                m_gpuMaterials[i].hasDisplacementMap = true;
+            }
+        }
+
+        createSrvAt(
+            displacementSrv,
+            hasDisplacement ? m_gpuMaterials[i].displacementTexture.Get() : m_defaultWhiteTexture.Get(),
+            hasDisplacement ? displacementFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
     }
 
     CreateBuffer(

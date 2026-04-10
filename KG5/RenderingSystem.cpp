@@ -117,6 +117,17 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     // 8=Rain point lights debug (alias of point-only for explicit QA)
     if (key >= '0' && key <= '8')
         m_debugMode = static_cast<UINT>(key - '0');
+
+    // Geometry debug visualization (F1..F4):
+    // F1 = regular render
+    // F2 = transformed normal visualization
+    // F3 = displacement value visualization
+    // F4 = tessellation factor visualization
+    if (key == VK_F1) m_geometryDebugMode = 0;
+    if (key == VK_F2) m_geometryDebugMode = 1;
+    if (key == VK_F3) m_geometryDebugMode = 2;
+    if (key == VK_F4) m_geometryDebugMode = 3;
+    if (key == VK_F5) m_debugStrongDisplacement = (m_debugStrongDisplacement == 0) ? 1u : 0u;
 }
 
 void RenderingSystem::OnKeyUp(WPARAM key)
@@ -223,13 +234,13 @@ void RenderingSystem::CreateRootSignatures()
 {
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
         CD3DX12_ROOT_PARAMETER params[4];
         params[0].InitAsConstantBufferView(0); // ObjectTransformConstants
         params[1].InitAsConstantBufferView(1); // GeometryFrameConstants
         params[2].InitAsConstantBufferView(2); // MaterialConstants
-        params[3].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[3].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
 
         CD3DX12_STATIC_SAMPLER_DESC sampler(
             0,
@@ -360,27 +371,33 @@ void RenderingSystem::CreatePSOs()
     };
 
     compileShader(L"GeometryPass.hlsl", "VSMain", "vs_5_0", m_geoVS);
+    compileShader(L"GeometryPass.hlsl", "HSMain", "hs_5_0", m_geoHS);
+    compileShader(L"GeometryPass.hlsl", "DSMain", "ds_5_0", m_geoDS);
     compileShader(L"GeometryPass.hlsl", "PSMain", "ps_5_0", m_geoPS);
     compileShader(L"LightingPass.hlsl", "VSFullscreen", "vs_5_0", m_lightFullscreenVS);
     compileShader(L"RainLightProxy.hlsl", "VSProxy", "vs_5_0", m_rainProxyVS);
 
     D3D12_INPUT_ELEMENT_DESC geoLayout[] =
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "POSITION",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD",  0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "BITANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC geoDesc{};
     geoDesc.InputLayout = { geoLayout, _countof(geoLayout) };
     geoDesc.pRootSignature = m_geometryRS.Get();
     geoDesc.VS = { m_geoVS->GetBufferPointer(), m_geoVS->GetBufferSize() };
+    geoDesc.HS = { m_geoHS->GetBufferPointer(), m_geoHS->GetBufferSize() };
+    geoDesc.DS = { m_geoDS->GetBufferPointer(), m_geoDS->GetBufferSize() };
     geoDesc.PS = { m_geoPS->GetBufferPointer(), m_geoPS->GetBufferSize() };
     geoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     geoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     geoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     geoDesc.SampleMask = UINT_MAX;
-    geoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    geoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     geoDesc.NumRenderTargets = 3;
     geoDesc.RTVFormats[0] = m_gbuffer.GetFormat(GBuffer::Albedo);
     geoDesc.RTVFormats[1] = m_gbuffer.GetFormat(GBuffer::Normal);
@@ -701,7 +718,7 @@ void RenderingSystem::GeometryPass()
 
     cmdList->SetGraphicsRootSignature(m_geometryRS.Get());
     cmdList->SetPipelineState(m_geometryPSO.Get());
-    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
     cmdList->IASetIndexBuffer(m_renderer.GetIbView());
 
@@ -711,6 +728,11 @@ void RenderingSystem::GeometryPass()
     GeometryFrameConstants frame{};
     frame.View = m_view;
     frame.Proj = m_proj;
+    frame.CameraPos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
+    frame.TessFactorRange = XMFLOAT2(m_tessMinFactor, m_tessMaxFactor);
+    frame.TessDistanceRange = XMFLOAT2(m_tessMinDistance, m_tessMaxDistance);
+    frame.GeometryDebugMode = m_geometryDebugMode;
+    frame.DebugStrongDisplacement = m_debugStrongDisplacement;
 
     void* frameMapped = nullptr;
     m_geometryFrameCB->Map(0, nullptr, &frameMapped);
@@ -747,6 +769,10 @@ void RenderingSystem::GeometryPass()
         material.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
         material.SpecularPower = 32.0f;
         material.HasTexture = 0;
+        material.HasNormalMap = 0;
+        material.HasDisplacementMap = 0;
+        material.DisplacementScale = 0.0f;
+        material.DisplacementBias = 0.0f;
 
         UINT textureSrv = 0;
         if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
@@ -755,10 +781,20 @@ void RenderingSystem::GeometryPass()
             material.MaterialDiffuse = mat.diffuse;
             material.MaterialSpecular = mat.specular;
             material.SpecularPower = mat.specPower;
-            if (mat.srvHeapIndex >= 0)
+            if (mat.diffuseSrvHeapIndex >= 0)
             {
                 material.HasTexture = 1;
-                textureSrv = static_cast<UINT>(mat.srvHeapIndex);
+                textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
+            }
+            if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
+            {
+                material.HasNormalMap = 1;
+            }
+            if (mat.displacementSrvHeapIndex >= 0 && mat.hasDisplacementMap)
+            {
+                material.HasDisplacementMap = 1;
+                material.DisplacementScale = mat.displacementScale;
+                material.DisplacementBias = mat.displacementBias;
             }
         }
 

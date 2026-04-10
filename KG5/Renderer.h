@@ -20,6 +20,8 @@ struct Vertex {
     XMFLOAT3 Position;
     XMFLOAT3 Normal;
     XMFLOAT2 TexCoord;
+    XMFLOAT3 Tangent;
+    XMFLOAT3 Bitangent;
 };
 
 // Geometry pass constants are intentionally split:
@@ -36,6 +38,12 @@ struct GeometryFrameConstants
 {
     XMFLOAT4X4 View;
     XMFLOAT4X4 Proj;
+    XMFLOAT4 CameraPos;
+    XMFLOAT2 TessFactorRange;
+    XMFLOAT2 TessDistanceRange;
+    UINT GeometryDebugMode = 0;
+    UINT DebugStrongDisplacement = 1;
+    UINT GeometryFramePad[2] = { 0, 0 };
 };
 
 struct MaterialConstants
@@ -44,6 +52,10 @@ struct MaterialConstants
     XMFLOAT4 MaterialSpecular;
     float SpecularPower;
     int HasTexture;
+    int HasNormalMap;
+    int HasDisplacementMap;
+    float DisplacementScale;
+    float DisplacementBias;
     float Pad[2];
 };
 
@@ -54,12 +66,22 @@ static_assert(sizeof(MaterialConstants) % 16 == 0, "MaterialConstants must be 16
 // to 256-byte boundaries where uploaded (see RenderingSystem stride setup).
 
 struct GpuMaterial {
-    ComPtr<ID3D12Resource> texture;
-    ComPtr<ID3D12Resource> textureUpload;
-    int srvHeapIndex = -1;
+    ComPtr<ID3D12Resource> diffuseTexture;
+    ComPtr<ID3D12Resource> diffuseTextureUpload;
+    ComPtr<ID3D12Resource> normalTexture;
+    ComPtr<ID3D12Resource> normalTextureUpload;
+    ComPtr<ID3D12Resource> displacementTexture;
+    ComPtr<ID3D12Resource> displacementTextureUpload;
+    int diffuseSrvHeapIndex = -1;
+    int normalSrvHeapIndex = -1;
+    int displacementSrvHeapIndex = -1;
     XMFLOAT4 diffuse = { 1, 1, 1, 1 };
     XMFLOAT4 specular = { 1, 1, 1, 1 };
     float specPower = 32.0f;
+    float displacementScale = 0.0f;
+    float displacementBias = 0.0f;
+    bool hasNormalMap = false;
+    bool hasDisplacementMap = false;
 };
 
 class Renderer {
@@ -151,6 +173,11 @@ private:
     ComPtr<ID3D12Resource> m_indexBuffer;
     ComPtr<ID3D12Resource> m_defaultWhiteTexture;
     ComPtr<ID3D12Resource> m_defaultWhiteUpload;
+    bool m_forceSponzaDiagnosticMaterialOverride = true;
+    ComPtr<ID3D12Resource> m_globalOverrideNormalTexture;
+    ComPtr<ID3D12Resource> m_globalOverrideNormalUpload;
+    ComPtr<ID3D12Resource> m_globalOverrideDisplacementTexture;
+    ComPtr<ID3D12Resource> m_globalOverrideDisplacementUpload;
     D3D12_VERTEX_BUFFER_VIEW m_vbView{};
     D3D12_INDEX_BUFFER_VIEW m_ibView{};
     std::vector<MeshSubset> m_subsets;

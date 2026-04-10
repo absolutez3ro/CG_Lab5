@@ -95,6 +95,8 @@ private:
     ComPtr<ID3D12PipelineState> m_psoRainProxy;
 
     ComPtr<ID3DBlob> m_geoVS;
+    ComPtr<ID3DBlob> m_geoHS;
+    ComPtr<ID3DBlob> m_geoDS;
     ComPtr<ID3DBlob> m_geoPS;
     ComPtr<ID3DBlob> m_lightFullscreenVS;
     ComPtr<ID3DBlob> m_rainProxyVS;
@@ -118,6 +120,10 @@ private:
     float m_pitch = 0.0f;
     float m_moveSpeed = 350.0f;
     float m_mouseSensitivity = 0.0035f;
+    float m_tessMinFactor = 1.0f;
+    float m_tessMaxFactor = 20.0f;
+    float m_tessMinDistance = 5.0f;
+    float m_tessMaxDistance = 80.0f;
 
     bool m_moveForward = false;
     bool m_moveBackward = false;
@@ -130,6 +136,13 @@ private:
     int m_lastMouseY = 0;
 
     UINT m_debugMode = 0;
+    // Geometry debug modes:
+    // 0 = regular shaded output
+    // 1 = transformed normal visualization
+    // 2 = displacement value visualization
+    // 3 = tessellation factor visualization
+    UINT m_geometryDebugMode = 0;
+    UINT m_debugStrongDisplacement = 1;
 
     std::vector<LightingContract::PointLightData> m_activePointLightsForGpu;
     std::array<LightingContract::SpotLightData, LightingContract::MaxSpotLights> m_spotLights{};
