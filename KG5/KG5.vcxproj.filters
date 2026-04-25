@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Исходные файлы">
@@ -30,6 +30,9 @@
     <ClCompile Include="Renderer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="ParticleSystemGPU.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="Timer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
@@ -45,6 +48,9 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="Renderer.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="ParticleSystemGPU.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
     <ClInclude Include="Timer.h">
@@ -70,6 +76,15 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <None Include="DebugLine.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="ParticlesCS.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="ParticleRender.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
     <None Include="packages.config" />
   </ItemGroup>
 </Project>

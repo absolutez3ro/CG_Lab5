@@ -7,6 +7,7 @@ cbuffer ObjectTransformConstants : register(b0)
 {
     float4x4 gWorld;
     float4x4 gWorldInvTranspose;
+    float4 gColorTint;
 };
 
 cbuffer GeometryFrameConstants : register(b1)
@@ -50,6 +51,7 @@ struct VSOutput
     float2 TexCoord   : TEXCOORD;
     float3 TangentW   : TANGENT;
     float3 BitangentW : BITANGENT;
+    float4 ColorTint  : COLOR0;
 };
 
 struct HSConstantsData
@@ -66,6 +68,7 @@ struct DSOutput
     float2 TexCoord   : TEXCOORD2;
     float3 TangentW   : TEXCOORD3;
     float3 BitangentW : TEXCOORD4;
+    float4 ColorTint  : COLOR0;
     float TessFactorN : TEXCOORD5;
 };
 
@@ -85,6 +88,7 @@ VSOutput VSMain(VSInput vin)
     vout.TexCoord = vin.TexCoord;
     vout.TangentW = normalize(mul(vin.Tangent, (float3x3)gWorld));
     vout.BitangentW = normalize(mul(vin.Bitangent, (float3x3)gWorld));
+    vout.ColorTint = gColorTint;
     return vout;
 }
 
@@ -189,6 +193,7 @@ DSOutput DSMain(
     o.BitangentW = bitangentW;
     o.TexCoord = texCoord;
     o.TessFactorN = saturate(hsConst.InsideTess / 16.0f);
+    o.ColorTint = gColorTint;
     return o;
 }
 
@@ -196,6 +201,7 @@ PSOutput PSMain(DSOutput pin)
 {
     PSOutput o;
     float4 albedo = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord) : gMaterialDiffuse;
+    albedo.rgb *= pin.ColorTint.rgb;
     float3 n = normalize(pin.NormalW);
 
     if (gHasNormalMap != 0)
@@ -252,4 +258,41 @@ PSOutput PSMain(DSOutput pin)
     o.Normal = float4(n * 0.5f + 0.5f, 1.0f);
     o.Material = float4(gMaterialSpecular.rgb, saturate(gSpecularPower / 255.0f));
     return o;
+}
+
+struct VSNoTessOutput
+{
+    float4 PositionH  : SV_POSITION;
+    float3 PositionW  : TEXCOORD0;
+    float3 NormalW    : TEXCOORD1;
+    float2 TexCoord   : TEXCOORD2;
+    float3 TangentW   : TEXCOORD3;
+    float3 BitangentW : TEXCOORD4;
+};
+
+VSNoTessOutput VSMainNoTess(VSInput vin)
+{
+    VSNoTessOutput o;
+    float4 posW = mul(float4(vin.Position, 1.0f), gWorld);
+    o.PositionW = posW.xyz;
+    o.PositionH = mul(mul(posW, gView), gProj);
+    o.NormalW = normalize(mul(vin.Normal, (float3x3)gWorldInvTranspose));
+    o.TexCoord = vin.TexCoord;
+    o.TangentW = normalize(mul(vin.Tangent, (float3x3)gWorld));
+    o.BitangentW = normalize(mul(vin.Bitangent, (float3x3)gWorld));
+    return o;
+}
+
+PSOutput PSMainNoTess(VSNoTessOutput pin)
+{
+    DSOutput ds;
+    ds.PositionH = pin.PositionH;
+    ds.PositionW = pin.PositionW;
+    ds.NormalW = pin.NormalW;
+    ds.TexCoord = pin.TexCoord;
+    ds.TangentW = pin.TangentW;
+    ds.BitangentW = pin.BitangentW;
+    ds.ColorTint = gColorTint;
+    ds.TessFactorN = 0.0f;
+    return PSMain(ds);
 }

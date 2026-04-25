@@ -32,6 +32,7 @@ struct ObjectTransformConstants
 {
     XMFLOAT4X4 World;
     XMFLOAT4X4 WorldInvTranspose;
+    XMFLOAT4 ColorTint = XMFLOAT4(1, 1, 1, 1);
 };
 
 struct GeometryFrameConstants
@@ -91,6 +92,9 @@ public:
     void EndFrame();
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
+    bool LoadPrimitiveCubeScene();
+    bool LoadMassPrimitiveScene();
+    void WaitForIdle() { WaitForGPU(); }
 
     ID3D12Device* GetDevice() { return m_device.Get(); }
     ID3D12GraphicsCommandList* GetCmdList() { return m_cmdList.Get(); }
@@ -133,6 +137,8 @@ public:
     const D3D12_INDEX_BUFFER_VIEW* GetIbView() const { return &m_ibView; }
     const std::vector<MeshSubset>& GetSubsets() const { return m_subsets; }
     const std::vector<GpuMaterial>& GetMaterials() const { return m_gpuMaterials; }
+    UINT GetVertexCount() const { return (m_vbView.StrideInBytes > 0) ? (m_vbView.SizeInBytes / m_vbView.StrideInBytes) : 0; }
+    UINT GetIndexCount() const { return m_ibView.SizeInBytes / sizeof(UINT); }
 
     void CreateBuffer(const void* data, UINT size, ID3D12Resource** resource);
     void TransitionDepthToShaderResource();

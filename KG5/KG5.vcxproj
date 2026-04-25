@@ -136,6 +136,7 @@
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
     <ClCompile Include="Renderer.cpp" />
+    <ClCompile Include="ParticleSystemGPU.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="TextureLoader.cpp" />
     <ClCompile Include="Timer.cpp" />
@@ -146,6 +147,7 @@
     <ClInclude Include="InputDevice.h" />
     <ClInclude Include="ObjLoader.h" />
     <ClInclude Include="Renderer.h" />
+    <ClInclude Include="ParticleSystemGPU.h" />
     <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="TextureLoader.h" />
@@ -153,6 +155,9 @@
     <ClInclude Include="Window.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="DebugLine.hlsl" />
+    <None Include="ParticlesCS.hlsl" />
+    <None Include="ParticleRender.hlsl" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

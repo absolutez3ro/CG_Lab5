@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstdio>
+#include <cwchar>
+#include <sstream>
+#include <vector>
 
 using namespace DirectX;
 
@@ -16,6 +19,15 @@ static void RS_ThrowIfFailed(HRESULT hr)
 static float RS_Lerp(float a, float b, float t)
 {
     return a + (b - a) * t;
+}
+
+static DirectX::XMFLOAT4 RS_NormalizePlane(const DirectX::XMFLOAT4& p)
+{
+    const float len = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+    if (len <= 0.000001f)
+        return p;
+    const float invLen = 1.0f / len;
+    return DirectX::XMFLOAT4(p.x * invLen, p.y * invLen, p.z * invLen, p.w * invLen);
 }
 
 struct alignas(256) RainProxyFrameConstants
@@ -30,8 +42,12 @@ struct alignas(256) RainProxyFrameConstants
 
 bool RenderingSystem::Init(HWND hwnd, int width, int height)
 {
-    if (!m_renderer.Init(hwnd, width, height))
-        return false;
+    try
+    {
+        m_hwnd = hwnd;
+
+        if (!m_renderer.Init(hwnd, width, height))
+            return false;
 
     m_gbuffer.Initialize(
         m_renderer.GetDevice(),
@@ -43,6 +59,8 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         m_renderer.GetGbufferSrvGpuStart(),
         m_renderer.GetSrvDescriptorSize());
 
+    ApplyDirtySceneSettings();
+
     XMMATRIX view = XMMatrixLookAtLH(
         XMLoadFloat3(&m_cameraPos),
         XMVectorSet(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z + 1.0f, 1.0f),
@@ -53,6 +71,8 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
 
     CreateRootSignatures();
     CreatePSOs();
+    CreateDebugLineResources();
+    CreateDebugLinePSO();
     SetupSceneLights();
 
     m_objectTransformCbStride = (sizeof(ObjectTransformConstants) + 255u) & ~255u;
@@ -94,16 +114,730 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         m_renderer.GetSrvDescriptorSize());
     m_renderer.GetDevice()->CreateShaderResourceView(m_pointLightsDefaultBuffer.Get(), &pointLightsSrvDesc, pointLightsSrvCpuHandle);
 
-    m_initialized = true;
+        if (!LoadMassPrimitiveScene())
+            return false;
+
+        if (!m_particles.Initialize(&m_renderer))
+            return false;
+        m_particlesReinitRequested = true;
+
+        m_initialized = true;
+        UpdateWindowTitle();
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        std::string msg = std::string("RenderingSystem::Init failed:\n") + ex.what();
+        OutputDebugStringA((msg + "\n").c_str());
+        MessageBoxA(nullptr, msg.c_str(), "Rendering Init Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+}
+
+std::string RenderingSystem::GetExeDir() const
+{
+    char buf[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string path(buf);
+    size_t p = path.find_last_of("\\/");
+    return (p == std::string::npos) ? std::string() : path.substr(0, p + 1);
+}
+
+bool RenderingSystem::TryLoadSponzaWithFallbacks()
+{
+    const std::string exeDir = GetExeDir();
+    const char* candidates[] =
+    {
+        "assets/sponza/sponza.obj",
+        "..\\assets\\sponza\\sponza.obj",
+        "..\\..\\assets\\sponza\\sponza.obj",
+        "..\\..\\..\\assets\\sponza\\sponza.obj",
+    };
+
+    for (const char* rel : candidates)
+    {
+        const std::string fullPath = exeDir + rel;
+        std::string msg = std::string("[SceneSwitch][Sponza] Loading OBJ: ") + fullPath + "\n";
+        OutputDebugStringA(msg.c_str());
+        if (m_renderer.LoadObj(fullPath))
+        {
+            OutputDebugStringA("[SceneSwitch][Sponza] LoadObj success\n");
+            return true;
+        }
+    }
+
+    OutputDebugStringA("[SceneSwitch][Sponza] LoadObj failed for all fallback candidates\n");
+
+    std::wstring msg =
+        L"Failed to load Sponza scene.\n\n"
+        L"Expected file:\n"
+        L"assets\\sponza\\sponza.obj\n\n"
+        L"Copy the assets/sponza folder from Lab5_clean to Lab5_dirt if it is missing.\n\n"
+        L"Exe dir:\n";
+    msg += std::wstring(exeDir.begin(), exeDir.end());
+    MessageBoxW(nullptr, msg.c_str(), L"Sponza Load Error", MB_OK | MB_ICONERROR);
+    return false;
+}
+
+void RenderingSystem::ApplySponzaSceneSettings()
+{
+    m_cameraPos = XMFLOAT3(0.0f, 120.0f, -300.0f);
+    m_yaw = 0.0f;
+    m_pitch = 0.0f;
+    m_moveSpeed = 350.0f;
+    m_tessMinFactor = 1.0f;
+    m_tessMaxFactor = 20.0f;
+    m_tessMinDistance = 5.0f;
+    m_tessMaxDistance = 80.0f;
+    m_ambientColor = XMFLOAT4(0.16f, 0.16f, 0.18f, 1.0f);
+    m_directionalLightDirection = XMFLOAT3(0.20f, -1.0f, 0.10f);
+    m_directionalLightColor = XMFLOAT3(0.95f, 0.97f, 1.00f);
+    m_directionalLightIntensity = 1.35f;
+}
+
+void RenderingSystem::ApplyDirtySceneSettings()
+{
+    // Dirty scene defaults.
+    m_cameraPos = XMFLOAT3(-235.0f, 54.0f, -235.0f);
+    m_yaw = 0.78f;
+    m_pitch = -0.28f;
+    m_moveSpeed = 350.0f;
+    m_tessMinFactor = 1.0f;
+    m_tessMaxFactor = 1.0f;
+    m_tessMinDistance = 5.0f;
+    m_tessMaxDistance = 80.0f;
+    m_ambientColor = XMFLOAT4(0.28f, 0.28f, 0.30f, 1.0f);
+    m_directionalLightDirection = XMFLOAT3(0.30f, -1.0f, 0.25f);
+    m_directionalLightColor = XMFLOAT3(1.0f, 1.0f, 1.0f);
+    m_directionalLightIntensity = 2.20f;
+}
+
+bool RenderingSystem::SwitchToSponzaScene()
+{
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+        return true;
+
+    OutputDebugStringA("[SceneSwitch][Sponza] Begin\n");
+    LogSceneState("[SceneSwitch][Sponza] Pre");
+    OutputDebugStringA("[SceneSwitch][Sponza] WaitForIdle before\n");
+    m_renderer.WaitForIdle();
+
+    OutputDebugStringA("[SceneSwitch][Sponza] Set flags begin\n");
+    if (!TryLoadSponzaWithFallbacks())
+        return false;
+
+    m_activeSceneKind = DemoSceneKind::Sponza;
+    ApplySponzaSceneSettings();
+    m_renderMainSceneModel = true;
+    m_useTessellationForScene = true;
+    m_enableFallingLights = true;
+    m_enableGroundPlane = false;
+    m_showCullingDebugGrid = false;
+    m_debugLineVertices.clear();
+    OutputDebugStringA("[SceneSwitch][Sponza] Set flags done\n");
+    LogSceneState("[SceneSwitch][Sponza] AfterFlags");
+
+    OutputDebugStringA("[SceneSwitch][Sponza] BuildSingleMainSceneObject begin\n");
+    BuildSingleMainSceneObject();
+    OutputDebugStringA("[SceneSwitch][Sponza] BuildSingleMainSceneObject done\n");
+    LogSceneState("[SceneSwitch][Sponza] AfterSingleObject");
+
+    OutputDebugStringA("[SceneSwitch][Sponza] SetupSceneLights begin\n");
+    SetupSceneLights();
+    OutputDebugStringA("[SceneSwitch][Sponza] SetupSceneLights done\n");
+    // Restart particles so the Sponza fountain appears immediately at the demo emitter location.
+    m_particlesReinitRequested = true;
+    UpdateViewMatrix();
+    UpdateWindowTitle();
+    OutputDebugStringA("[SceneSwitch][Sponza] WaitForIdle after\n");
+    m_renderer.WaitForIdle();
+    LogSceneState("[SceneSwitch][Sponza] EndState");
+    OutputDebugStringA("[SceneSwitch][Sponza] End\n");
     return true;
+}
+
+bool RenderingSystem::SwitchToDirtyScene()
+{
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
+        return true;
+
+    OutputDebugStringA("[SceneSwitch][Dirty] Begin\n");
+    LogSceneState("[SceneSwitch][Dirty] Pre");
+    m_renderer.WaitForIdle();
+
+    m_activeSceneKind = DemoSceneKind::DirtyInstancing;
+    m_renderMainSceneModel = false;
+    m_useTessellationForScene = false;
+    m_enableFallingLights = false;
+    m_enableGroundPlane = true;
+    m_debugStrongDisplacement = 0;
+    m_geometryDebugMode = 0;
+    m_sceneObjectCount = 1000;
+    m_massPlacementMode = MassPlacementMode::Grid;
+    m_showCullingDebugGrid = m_enableCulling;
+    ApplyDirtySceneSettings();
+    m_activePointLightsForGpu.clear();
+    m_activePointLights = 0;
+    m_rainDebugStats = RainDebugStats{};
+    if (!LoadMassPrimitiveScene())
+    {
+        OutputDebugStringA("[SceneSwitch] Failed to load dirty primitive cube scene\n");
+        return false;
+    }
+    SetupSceneLights();
+    RebuildCullingDebugLines();
+    // Restart particles so old Sponza fountain particles do not remain in the Dirty scene.
+    m_particlesReinitRequested = true;
+    UpdateViewMatrix();
+    UpdateWindowTitle();
+    m_renderer.WaitForIdle();
+    LogSceneState("[SceneSwitch][Dirty] EndState");
+    OutputDebugStringA("[SceneSwitch][Dirty] End\n");
+    return true;
+}
+
+void RenderingSystem::UpdateWindowTitle() const
+{
+    if (!m_hwnd)
+        return;
+
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    {
+        wchar_t title[256];
+        swprintf_s(
+            title,
+            L"[SPONZA] Deferred Renderer | Particles: %u %s %s",
+            m_particles.GetAliveCountForDraw(),
+            m_particles.IsEnabled() ? L"ON" : L"OFF",
+            m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+        SetWindowTextW(m_hwnd, title);
+    }
+    else
+    {
+        wchar_t title[320];
+        const wchar_t* modeLabel = L"[NO CULLING]";
+        if (m_enableCulling)
+            modeLabel = m_useOctreeMode ? L"[OCTREE + GRID]" : L"[FRUSTUM + GRID]";
+        swprintf_s(
+            title,
+            L"%s INSTANCING: %u / %u cubes visible | Particles: %u %s %s",
+            modeLabel,
+            m_visibleObjectCount,
+            m_sceneObjectCount,
+            m_particles.GetAliveCountForDraw(),
+            m_particles.IsEnabled() ? L"ON" : L"OFF",
+            m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+        SetWindowTextW(m_hwnd, title);
+    }
+}
+
+XMFLOAT3 RenderingSystem::GetParticleEmitterPosition() const
+{
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    {
+        // Demo fountain inside Sponza, in front of the default camera.
+        // This position is low enough to read as a fountain instead of floating particles.
+        return XMFLOAT3(0.0f, 24.0f, -85.0f);
+    }
+
+    return XMFLOAT3(0.0f, 40.0f, 0.0f);
+}
+
+ParticleSystemGPU::FountainSettings RenderingSystem::GetParticleFountainSettings() const
+{
+    ParticleSystemGPU::FountainSettings settings{};
+
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    {
+        // Larger and brighter than the Dirty-scene particles, so the fountain is obvious during demonstration.
+        // 18 * about 3 seconds * 60 FPS keeps the pool below 4096 live particles.
+        settings.EmitPerFrame = 18;
+        settings.BaseVelocity = XMFLOAT3(0.0f, 82.0f, 16.0f);
+        settings.VelocityRandomness = XMFLOAT3(38.0f, 22.0f, 38.0f);
+        settings.Gravity = XMFLOAT3(0.0f, -38.0f, 0.0f);
+        settings.MinLifeSpan = 2.2f;
+        settings.MaxLifeSpan = 3.4f;
+        settings.MinSize = 5.0f;
+        settings.MaxSize = 10.0f;
+        settings.GroundY = 0.0f;
+        settings.EnableGroundCollision = 1;
+        settings.StartColorA = XMFLOAT4(1.0f, 0.75f, 0.18f, 1.0f);
+        settings.StartColorB = XMFLOAT4(0.25f, 0.65f, 1.0f, 1.0f);
+        return settings;
+    }
+
+    // Smaller fountain for the Dirty cubes scene.
+    settings.EmitPerFrame = 32;
+    settings.BaseVelocity = XMFLOAT3(0.0f, 30.0f, 0.0f);
+    settings.VelocityRandomness = XMFLOAT3(12.0f, 8.0f, 12.0f);
+    settings.Gravity = XMFLOAT3(0.0f, -9.8f, 0.0f);
+    settings.MinLifeSpan = 2.0f;
+    settings.MaxLifeSpan = 3.2f;
+    settings.MinSize = 1.6f;
+    settings.MaxSize = 4.0f;
+    settings.GroundY = -10.0f;
+    settings.EnableGroundCollision = 1;
+    settings.StartColorA = XMFLOAT4(1.0f, 0.65f, 0.15f, 1.0f);
+    settings.StartColorB = XMFLOAT4(0.35f, 0.55f, 1.0f, 1.0f);
+    return settings;
+}
+
+
+void RenderingSystem::RequestSceneSwitch(DemoSceneKind scene)
+{
+    if (scene == DemoSceneKind::Sponza)
+        OutputDebugStringA("[SceneSwitch] Request Sponza\n");
+    else
+        OutputDebugStringA("[SceneSwitch] Request Dirty\n");
+
+    m_pendingSceneSwitch = scene;
+}
+
+bool RenderingSystem::ApplyPendingSceneSwitchIfNeeded()
+{
+    if (!m_pendingSceneSwitch.has_value())
+        return true;
+
+    const DemoSceneKind requested = *m_pendingSceneSwitch;
+    m_pendingSceneSwitch.reset();
+
+    if (requested == m_activeSceneKind)
+        return true;
+
+    if (requested == DemoSceneKind::Sponza)
+        return SwitchToSponzaScene();
+
+    return SwitchToDirtyScene();
+}
+
+void RenderingSystem::BuildSingleMainSceneObject()
+{
+    m_sceneObjects.clear();
+    m_sceneObjects.resize(1);
+
+    const XMMATRIX identity = XMMatrixIdentity();
+    XMStoreFloat4x4(&m_sceneObjects[0].World, XMMatrixTranspose(identity));
+    XMStoreFloat4x4(&m_sceneObjects[0].WorldInvTranspose, XMMatrixTranspose(identity));
+    m_sceneObjects[0].BoundsCenter = XMFLOAT3(0.0f, 0.0f, 0.0f);
+    m_sceneObjects[0].BoundsRadius = 1.0f;
+    m_sceneObjects[0].ColorTint = XMFLOAT4(1, 1, 1, 1);
+    m_sceneObjects[0].Visible = true;
+
+    m_visibleObjectCount = 1;
+}
+
+void RenderingSystem::RegenerateSceneObjects()
+{
+    const UINT requestedCount = (std::max)(1u, m_sceneObjectCount);
+    const UINT subsetCount = static_cast<UINT>((std::max)(size_t(1), m_renderer.GetSubsets().size()));
+    const UINT maxCountByDrawBudget = (std::max)(1u, m_sceneMaxDrawCallsBudget / subsetCount);
+    const UINT objectCount = (std::min)(requestedCount, maxCountByDrawBudget);
+
+    if (objectCount < requestedCount)
+    {
+        char msg[256];
+        std::snprintf(
+            msg,
+            sizeof(msg),
+            "[SceneCull] Requested %u objects clipped to %u (subsetCount=%u, drawBudget=%u) to avoid GPU timeout.\n",
+            requestedCount,
+            objectCount,
+            subsetCount,
+            m_sceneMaxDrawCallsBudget);
+        OutputDebugStringA(msg);
+    }
+
+    m_sceneObjects.clear();
+    m_sceneObjects.reserve(objectCount);
+
+    const float width = m_massPlacementMaxXZ.x - m_massPlacementMinXZ.x;
+    const float depth = m_massPlacementMaxXZ.y - m_massPlacementMinXZ.y;
+
+    UINT gridCols = static_cast<UINT>(std::ceil(std::sqrt(static_cast<float>(objectCount))));
+    gridCols = (std::max)(1u, gridCols);
+    const UINT gridRows = static_cast<UINT>(std::ceil(static_cast<float>(objectCount) / static_cast<float>(gridCols)));
+    const float gridStepX = (gridCols > 1u) ? (width / static_cast<float>(gridCols - 1u)) : width;
+    const float gridStepZ = (gridRows > 1u) ? (depth / static_cast<float>(gridRows - 1u)) : depth;
+    const float jitterX = 0.28f * gridStepX;
+    const float jitterZ = 0.28f * gridStepZ;
+    const uint32_t sceneSeed = 0x00C0FFEEu ^ (objectCount * 131u) ^ (static_cast<uint32_t>(m_massPlacementMode) * 977u);
+    std::mt19937 sceneRng(sceneSeed);
+    std::uniform_real_distribution<float> sceneUnitDist(0.0f, 1.0f);
+
+    for (UINT i = 0; i < objectCount; ++i)
+    {
+        float worldX = 0.0f;
+        float worldZ = 0.0f;
+        const float objectScale = m_massScaleMin + (m_massScaleMax - m_massScaleMin) * sceneUnitDist(sceneRng);
+        const float yOffset = m_massYOffsetMin + (m_massYOffsetMax - m_massYOffsetMin) * sceneUnitDist(sceneRng);
+        const float worldY = m_massPlacementY + 0.5f * objectScale + yOffset;
+
+        if (m_massPlacementMode == MassPlacementMode::Random)
+        {
+            worldX = m_massPlacementMinXZ.x + width * sceneUnitDist(sceneRng);
+            worldZ = m_massPlacementMinXZ.y + depth * sceneUnitDist(sceneRng);
+        }
+        else
+        {
+            const UINT row = i / gridCols;
+            const UINT col = i % gridCols;
+            const float tx = (gridCols > 1u) ? static_cast<float>(col) / static_cast<float>(gridCols - 1u) : 0.5f;
+            const float tz = (gridRows > 1u) ? static_cast<float>(row) / static_cast<float>(gridRows - 1u) : 0.5f;
+            worldX = m_massPlacementMinXZ.x + tx * width;
+            worldZ = m_massPlacementMinXZ.y + tz * depth;
+
+            const float offsetX = -jitterX + 2.0f * jitterX * sceneUnitDist(sceneRng);
+            const float offsetZ = -jitterZ + 2.0f * jitterZ * sceneUnitDist(sceneRng);
+            worldX = std::clamp(worldX + offsetX, m_massPlacementMinXZ.x, m_massPlacementMaxXZ.x);
+            worldZ = std::clamp(worldZ + offsetZ, m_massPlacementMinXZ.y, m_massPlacementMaxXZ.y);
+        }
+
+        const XMMATRIX world = XMMatrixScaling(objectScale, objectScale, objectScale) * XMMatrixTranslation(worldX, worldY, worldZ);
+
+        SceneObject object{};
+        XMStoreFloat4x4(&object.World, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&object.WorldInvTranspose, XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+        object.BoundsCenter = XMFLOAT3(
+            worldX + m_massObjectBoundsCenter.x * objectScale,
+            worldY + m_massObjectBoundsCenter.y * objectScale,
+            worldZ + m_massObjectBoundsCenter.z * objectScale);
+        object.BoundsRadius = m_massObjectBoundsRadius * objectScale;
+        object.ColorTint = XMFLOAT4(
+            0.70f + 0.50f * sceneUnitDist(sceneRng),
+            0.70f + 0.50f * sceneUnitDist(sceneRng),
+            0.70f + 0.50f * sceneUnitDist(sceneRng),
+            1.0f);
+        object.Visible = true;
+        m_sceneObjects.push_back(object);
+    }
+
+    m_visibleObjectCount = static_cast<UINT>(m_sceneObjects.size());
+    RebuildCullingDebugLines();
+    UpdateObjectVisibility();
+    UpdateWindowTitle();
+}
+
+bool RenderingSystem::LoadMassPrimitiveScene()
+{
+    if (!m_renderer.LoadPrimitiveCubeScene())
+        return false;
+
+    m_useTessellationForScene = false;
+    m_renderMainSceneModel = false;
+    RegenerateSceneObjects();
+    OutputDirtySceneStats();
+    return true;
+}
+
+RenderingSystem::FrustumPlanes RenderingSystem::BuildFrustumPlanes() const
+{
+    const XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    const XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    const XMMATRIX vp = view * proj;
+
+    XMFLOAT4X4 m{};
+    XMStoreFloat4x4(&m, vp);
+
+    FrustumPlanes planes{};
+    planes.Left = RS_NormalizePlane(XMFLOAT4(m._14 + m._11, m._24 + m._21, m._34 + m._31, m._44 + m._41));
+    planes.Right = RS_NormalizePlane(XMFLOAT4(m._14 - m._11, m._24 - m._21, m._34 - m._31, m._44 - m._41));
+    planes.Top = RS_NormalizePlane(XMFLOAT4(m._14 - m._12, m._24 - m._22, m._34 - m._32, m._44 - m._42));
+    planes.Bottom = RS_NormalizePlane(XMFLOAT4(m._14 + m._12, m._24 + m._22, m._34 + m._32, m._44 + m._42));
+    planes.Near = RS_NormalizePlane(XMFLOAT4(m._13, m._23, m._33, m._43));
+    planes.Far = RS_NormalizePlane(XMFLOAT4(m._14 - m._13, m._24 - m._23, m._34 - m._33, m._44 - m._43));
+    return planes;
+}
+
+bool RenderingSystem::IsSphereVisible(const XMFLOAT3& center, float radius, const FrustumPlanes& frustum) const
+{
+    const XMFLOAT4 planes[] = { frustum.Left, frustum.Right, frustum.Top, frustum.Bottom, frustum.Near, frustum.Far };
+    for (const XMFLOAT4& p : planes)
+    {
+        const float distance = p.x * center.x + p.y * center.y + p.z * center.z + p.w;
+        if (distance < -radius)
+            return false;
+    }
+    return true;
+}
+
+void RenderingSystem::UpdateObjectVisibility()
+{
+    if (m_activeSceneKind != DemoSceneKind::DirtyInstancing)
+    {
+        for (SceneObject& object : m_sceneObjects)
+            object.Visible = true;
+        m_visibleObjectCount = static_cast<UINT>(m_sceneObjects.size());
+        return;
+    }
+
+    if (!m_enableCulling)
+    {
+        for (SceneObject& object : m_sceneObjects)
+            object.Visible = true;
+        m_visibleObjectCount = static_cast<UINT>(m_sceneObjects.size());
+        return;
+    }
+
+    const FrustumPlanes frustum = BuildFrustumPlanes();
+    UINT visible = 0;
+    for (SceneObject& object : m_sceneObjects)
+    {
+        object.Visible = IsSphereVisible(object.BoundsCenter, object.BoundsRadius, frustum);
+        if (object.Visible)
+            ++visible;
+    }
+    m_visibleObjectCount = visible;
+}
+
+void RenderingSystem::OutputDirtySceneStats() const
+{
+    const auto& subsets = m_renderer.GetSubsets();
+    char msg[256];
+    std::snprintf(
+        msg,
+        sizeof(msg),
+        "[SceneSwitch] Dirty stats: objects=%u subsets=%zu visible=%u tess=%d mainModel=%d\n",
+        m_sceneObjectCount,
+        subsets.size(),
+        m_visibleObjectCount,
+        m_useTessellationForScene ? 1 : 0,
+        m_renderMainSceneModel ? 1 : 0);
+    OutputDebugStringA(msg);
+}
+
+void RenderingSystem::LogSceneState(const char* stageTag) const
+{
+    const auto& subsets = m_renderer.GetSubsets();
+    const auto& materials = m_renderer.GetMaterials();
+    char msg[512];
+    std::snprintf(
+        msg,
+        sizeof(msg),
+        "%s scene=%d mainModel=%d tess=%d falling=%d sceneObjects=%zu subsets=%zu materials=%zu indices=%u vertices=%u topology=%s\n",
+        stageTag,
+        static_cast<int>(m_activeSceneKind),
+        m_renderMainSceneModel ? 1 : 0,
+        m_useTessellationForScene ? 1 : 0,
+        m_enableFallingLights ? 1 : 0,
+        m_sceneObjects.size(),
+        subsets.size(),
+        materials.size(),
+        m_renderer.GetIndexCount(),
+        m_renderer.GetVertexCount(),
+        m_useTessellationForScene ? "patch" : "triangle");
+    OutputDebugStringA(msg);
+}
+
+void RenderingSystem::CreateDebugLineResources()
+{
+    m_renderer.CreateBuffer(nullptr, sizeof(DebugLineConstants), &m_debugLineCB);
+}
+
+void RenderingSystem::CreateDebugLinePSO()
+{
+    // Created inside CreatePSOs(); kept for API symmetry.
+}
+
+void RenderingSystem::AddDebugLine(const XMFLOAT3& a, const XMFLOAT3& b, const XMFLOAT4& color)
+{
+    m_debugLineVertices.push_back(DebugLineVertex{ a, color });
+    m_debugLineVertices.push_back(DebugLineVertex{ b, color });
+}
+
+void RenderingSystem::AddDebugBox(const XMFLOAT3& min, const XMFLOAT3& max, const XMFLOAT4& color)
+{
+    const XMFLOAT3 p000{ min.x, min.y, min.z };
+    const XMFLOAT3 p001{ min.x, min.y, max.z };
+    const XMFLOAT3 p010{ min.x, max.y, min.z };
+    const XMFLOAT3 p011{ min.x, max.y, max.z };
+    const XMFLOAT3 p100{ max.x, min.y, min.z };
+    const XMFLOAT3 p101{ max.x, min.y, max.z };
+    const XMFLOAT3 p110{ max.x, max.y, min.z };
+    const XMFLOAT3 p111{ max.x, max.y, max.z };
+
+    AddDebugLine(p000, p001, color); AddDebugLine(p001, p011, color); AddDebugLine(p011, p010, color); AddDebugLine(p010, p000, color);
+    AddDebugLine(p100, p101, color); AddDebugLine(p101, p111, color); AddDebugLine(p111, p110, color); AddDebugLine(p110, p100, color);
+    AddDebugLine(p000, p100, color); AddDebugLine(p001, p101, color); AddDebugLine(p010, p110, color); AddDebugLine(p011, p111, color);
+}
+
+void RenderingSystem::RebuildCullingDebugLines()
+{
+    m_debugLineVertices.clear();
+    if (m_activeSceneKind != DemoSceneKind::DirtyInstancing || !m_enableCulling || !m_showCullingDebugGrid)
+        return;
+
+    const float minX = m_massPlacementMinXZ.x;
+    const float minZ = m_massPlacementMinXZ.y;
+    const float maxX = m_massPlacementMaxXZ.x;
+    const float maxZ = m_massPlacementMaxXZ.y;
+
+    if (!m_useOctreeMode)
+    {
+        AddDebugBox(XMFLOAT3(minX, 0.0f, minZ), XMFLOAT3(maxX, 80.0f, maxZ), XMFLOAT4(0.0f, 1.0f, 0.7f, 1.0f));
+        constexpr int gridN = 10;
+        for (int i = 0; i <= gridN; ++i)
+        {
+            const float t = static_cast<float>(i) / static_cast<float>(gridN);
+            const float x = RS_Lerp(minX, maxX, t);
+            const float z = RS_Lerp(minZ, maxZ, t);
+            AddDebugLine(XMFLOAT3(x, 0.0f, minZ), XMFLOAT3(x, 80.0f, minZ), XMFLOAT4(0.0f, 1.0f, 0.0f, 1.0f));
+            AddDebugLine(XMFLOAT3(x, 0.0f, minZ), XMFLOAT3(x, 0.0f, maxZ), XMFLOAT4(0.0f, 1.0f, 0.0f, 1.0f));
+            AddDebugLine(XMFLOAT3(minX, 0.0f, z), XMFLOAT3(maxX, 0.0f, z), XMFLOAT4(0.0f, 1.0f, 0.0f, 1.0f));
+        }
+    }
+    else
+    {
+        const XMFLOAT3 bmin(minX - 20.0f, 0.0f, minZ - 20.0f);
+        const XMFLOAT3 bmax(maxX + 20.0f, 120.0f, maxZ + 20.0f);
+        AddDebugBox(bmin, bmax, XMFLOAT4(1.0f, 1.0f, 0.0f, 1.0f));
+        const int levels = 3;
+        for (int level = 1; level <= levels; ++level)
+        {
+            const int div = 1 << level;
+            const XMFLOAT4 color = (level == 1) ? XMFLOAT4(1.0f, 0.6f, 0.1f, 1.0f) :
+                (level == 2) ? XMFLOAT4(1.0f, 0.3f, 0.1f, 1.0f) : XMFLOAT4(1.0f, 0.1f, 0.1f, 1.0f);
+            for (int i = 0; i < div; ++i)
+            {
+                for (int j = 0; j < div; ++j)
+                {
+                    const float x0 = RS_Lerp(bmin.x, bmax.x, static_cast<float>(i) / div);
+                    const float x1 = RS_Lerp(bmin.x, bmax.x, static_cast<float>(i + 1) / div);
+                    const float z0 = RS_Lerp(bmin.z, bmax.z, static_cast<float>(j) / div);
+                    const float z1 = RS_Lerp(bmin.z, bmax.z, static_cast<float>(j + 1) / div);
+                    AddDebugBox(XMFLOAT3(x0, 0.0f, z0), XMFLOAT3(x1, 60.0f + level * 20.0f, z1), color);
+                }
+            }
+        }
+    }
+}
+
+void RenderingSystem::UploadDebugLines()
+{
+    if (m_debugLineVertices.empty())
+        return;
+
+    if (m_debugLineVertices.size() > m_debugLineVertexCapacity || !m_debugLineVertexBuffer)
+    {
+        m_debugLineVertexCapacity = static_cast<UINT>(m_debugLineVertices.size() + m_debugLineVertices.size() / 2 + 64);
+        m_renderer.CreateBuffer(nullptr, static_cast<UINT>(sizeof(DebugLineVertex) * m_debugLineVertexCapacity), &m_debugLineVertexBuffer);
+    }
+
+    void* mapped = nullptr;
+    m_debugLineVertexBuffer->Map(0, nullptr, &mapped);
+    memcpy(mapped, m_debugLineVertices.data(), sizeof(DebugLineVertex) * m_debugLineVertices.size());
+    m_debugLineVertexBuffer->Unmap(0, nullptr);
+
+    m_debugLineVbView.BufferLocation = m_debugLineVertexBuffer->GetGPUVirtualAddress();
+    m_debugLineVbView.StrideInBytes = sizeof(DebugLineVertex);
+    m_debugLineVbView.SizeInBytes = static_cast<UINT>(sizeof(DebugLineVertex) * m_debugLineVertices.size());
+}
+
+void RenderingSystem::DebugLinePass()
+{
+    if (m_debugLineVertices.empty() || !m_debugLinePSO || !m_debugLineRS)
+        return;
+
+    UploadDebugLines();
+
+    DebugLineConstants cb{};
+    const XMMATRIX vp = XMMatrixMultiply(XMMatrixTranspose(XMLoadFloat4x4(&m_view)), XMMatrixTranspose(XMLoadFloat4x4(&m_proj)));
+    XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(vp));
+
+    void* mapped = nullptr;
+    m_debugLineCB->Map(0, nullptr, &mapped);
+    memcpy(mapped, &cb, sizeof(cb));
+    m_debugLineCB->Unmap(0, nullptr);
+
+    auto cmdList = m_renderer.GetCmdList();
+    auto rtv = m_renderer.GetBackBufferRtv();
+    cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    cmdList->SetGraphicsRootSignature(m_debugLineRS.Get());
+    cmdList->SetPipelineState(m_debugLinePSO.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    cmdList->IASetVertexBuffers(0, 1, &m_debugLineVbView);
+    cmdList->SetGraphicsRootConstantBufferView(0, m_debugLineCB->GetGPUVirtualAddress());
+    cmdList->DrawInstanced(static_cast<UINT>(m_debugLineVertices.size()), 1, 0, 0);
 }
 
 void RenderingSystem::OnKeyDown(WPARAM key)
 {
+    if (key == 'Z')
+    {
+        RequestSceneSwitch(DemoSceneKind::Sponza);
+        return;
+    }
+    if (key == 'X')
+    {
+        RequestSceneSwitch(DemoSceneKind::DirtyInstancing);
+        return;
+    }
+
     if (key == 'W') m_moveForward = true;
     if (key == 'S') m_moveBackward = true;
     if (key == 'A') m_moveLeft = true;
     if (key == 'D') m_moveRight = true;
+    if (key == 'Q') m_moveUp = true;
+    if (key == 'E') m_moveDown = true;
+    if (key == 'P')
+    {
+        m_particles.SetEnabled(!m_particles.IsEnabled());
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'O')
+    {
+        m_particles.SetSortEnabled(!m_particles.IsSortEnabled());
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'I')
+    {
+        m_particlesReinitRequested = true;
+        UpdateWindowTitle();
+        return;
+    }
+
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
+    {
+        if (key == '1')
+        {
+            if (m_enableCulling && !m_useOctreeMode)
+            {
+                m_enableCulling = false;
+                m_showCullingDebugGrid = false;
+                m_debugLineVertices.clear();
+            }
+            else
+            {
+                m_enableCulling = true;
+                m_useOctreeMode = false;
+                m_showCullingDebugGrid = true;
+                RebuildCullingDebugLines();
+            }
+            UpdateObjectVisibility();
+            UpdateWindowTitle();
+            return;
+        }
+        if (key == '2')
+        {
+            if (m_enableCulling && m_useOctreeMode)
+            {
+                m_enableCulling = false;
+                m_showCullingDebugGrid = false;
+                m_debugLineVertices.clear();
+            }
+            else
+            {
+                m_enableCulling = true;
+                m_useOctreeMode = true;
+                m_showCullingDebugGrid = true;
+                RebuildCullingDebugLines();
+            }
+            UpdateObjectVisibility();
+            UpdateWindowTitle();
+            return;
+        }
+    }
 
     // Debug modes:
     // 0=Final
@@ -117,6 +851,8 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     // 8=Rain point lights debug (alias of point-only for explicit QA)
     if (key >= '0' && key <= '8')
         m_debugMode = static_cast<UINT>(key - '0');
+    if (key == '9')
+        m_debugMode = 1;
 
     // Geometry debug visualization (F1..F4):
     // F1 = regular render
@@ -128,6 +864,31 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == VK_F3) m_geometryDebugMode = 2;
     if (key == VK_F4) m_geometryDebugMode = 3;
     if (key == VK_F5) m_debugStrongDisplacement = (m_debugStrongDisplacement == 0) ? 1u : 0u;
+
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
+    {
+        if (key == 'G')
+        {
+            m_massPlacementMode = MassPlacementMode::Grid;
+            RegenerateSceneObjects();
+            OutputDirtySceneStats();
+        }
+        if (key == 'R')
+        {
+            m_massPlacementMode = MassPlacementMode::Random;
+            RegenerateSceneObjects();
+            OutputDirtySceneStats();
+        }
+        if (key == VK_F6) m_sceneObjectCount = 200;
+        if (key == VK_F7) m_sceneObjectCount = 500;
+        if (key == VK_F8) m_sceneObjectCount = 1000;
+        if (key == VK_F9) m_sceneObjectCount = 2000;
+        if (key == VK_F6 || key == VK_F7 || key == VK_F8 || key == VK_F9)
+        {
+            RegenerateSceneObjects();
+            OutputDirtySceneStats();
+        }
+    }
 }
 
 void RenderingSystem::OnKeyUp(WPARAM key)
@@ -136,6 +897,8 @@ void RenderingSystem::OnKeyUp(WPARAM key)
     if (key == 'S') m_moveBackward = false;
     if (key == 'A') m_moveLeft = false;
     if (key == 'D') m_moveRight = false;
+    if (key == 'Q') m_moveUp = false;
+    if (key == 'E') m_moveDown = false;
 }
 
 void RenderingSystem::OnMouseDown(int x, int y)
@@ -191,6 +954,8 @@ void RenderingSystem::UpdateCamera(float dt)
     if (m_moveBackward) pos = XMVectorSubtract(pos, XMVectorScale(forwardXZ, step));
     if (m_moveLeft) pos = XMVectorSubtract(pos, XMVectorScale(rightXZ, step));
     if (m_moveRight) pos = XMVectorAdd(pos, XMVectorScale(rightXZ, step));
+    if (m_moveUp) pos = XMVectorAdd(pos, XMVectorSet(0.0f, step, 0.0f, 0.0f));
+    if (m_moveDown) pos = XMVectorSubtract(pos, XMVectorSet(0.0f, step, 0.0f, 0.0f));
 
     XMStoreFloat3(&m_cameraPos, pos);
     UpdateViewMatrix();
@@ -214,6 +979,9 @@ void RenderingSystem::UpdateViewMatrix()
 
 void RenderingSystem::BeginFrame(const float clearColor[4])
 {
+    // Must happen before command allocator/list reset in Renderer::BeginFrame().
+    ApplyPendingSceneSwitchIfNeeded();
+
     m_renderer.BeginFrame();
 
     auto cmdList = m_renderer.GetCmdList();
@@ -335,6 +1103,22 @@ void RenderingSystem::CreateRootSignatures()
         RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_rainProxyRS)));
     }
+
+    {
+        CD3DX12_ROOT_PARAMETER params[1];
+        params[0].InitAsConstantBufferView(0);
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(
+            1,
+            params,
+            0,
+            nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serialized, errors;
+        RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_debugLineRS)));
+    }
 }
 
 void RenderingSystem::CreatePSOs()
@@ -346,27 +1130,66 @@ void RenderingSystem::CreatePSOs()
 
     auto compileShader = [&](const wchar_t* file, const char* entry, const char* target, ComPtr<ID3DBlob>& outBlob)
     {
-        ComPtr<ID3DBlob> errors;
-        const HRESULT hr = D3DCompileFromFile(
-            file,
-            nullptr,
-            D3D_COMPILE_STANDARD_FILE_INCLUDE,
-            entry,
-            target,
-            flags,
-            0,
-            &outBlob,
-            &errors);
+        outBlob.Reset();
+        const std::string exeDir = GetExeDir();
+        const std::wstring exeDirW(exeDir.begin(), exeDir.end());
+        const std::wstring fileW(file);
 
-        if (FAILED(hr))
+        const std::vector<std::wstring> candidates =
         {
-            std::string message = "Shader compilation failed";
+            fileW,
+            exeDirW + fileW,
+            exeDirW + L"..\\..\\" + fileW,
+            exeDirW + L"..\\..\\..\\" + fileW,
+            exeDirW + L"..\\..\\..\\KG5\\" + fileW
+        };
+
+        HRESULT lastHr = E_FAIL;
+        std::wstring lastPath = fileW;
+        std::string lastCompilerError;
+
+        for (const std::wstring& candidate : candidates)
+        {
+            ComPtr<ID3DBlob> errors;
+            const HRESULT hr = D3DCompileFromFile(
+                candidate.c_str(),
+                nullptr,
+                D3D_COMPILE_STANDARD_FILE_INCLUDE,
+                entry,
+                target,
+                flags,
+                0,
+                &outBlob,
+                &errors);
+
+            if (SUCCEEDED(hr) && outBlob)
+            {
+                break;
+            }
+
+            lastHr = hr;
+            lastPath = candidate;
+            lastCompilerError.clear();
             if (errors && errors->GetBufferPointer())
             {
-                message += ": ";
-                message += static_cast<const char*>(errors->GetBufferPointer());
+                lastCompilerError = static_cast<const char*>(errors->GetBufferPointer());
             }
-            throw std::runtime_error(message);
+        }
+
+        if (!outBlob)
+        {
+            std::string fileUtf8(file, file + std::wcslen(file));
+            std::string lastPathUtf8(lastPath.begin(), lastPath.end());
+            std::ostringstream oss;
+            oss << "Shader compilation failed for " << fileUtf8
+                << " [entry=" << entry << ", target=" << target
+                << ", hr=0x" << std::hex << static_cast<unsigned long>(lastHr) << "]"
+                << ". Last tried path: " << lastPathUtf8;
+            if (!lastCompilerError.empty())
+            {
+                oss << ": " << lastCompilerError;
+            }
+            throw std::runtime_error(oss.str());
         }
     };
 
@@ -374,8 +1197,16 @@ void RenderingSystem::CreatePSOs()
     compileShader(L"GeometryPass.hlsl", "HSMain", "hs_5_0", m_geoHS);
     compileShader(L"GeometryPass.hlsl", "DSMain", "ds_5_0", m_geoDS);
     compileShader(L"GeometryPass.hlsl", "PSMain", "ps_5_0", m_geoPS);
+    compileShader(L"GeometryPass.hlsl", "VSMainNoTess", "vs_5_0", m_geoNoTessVS);
+    compileShader(L"GeometryPass.hlsl", "PSMainNoTess", "ps_5_0", m_geoNoTessPS);
     compileShader(L"LightingPass.hlsl", "VSFullscreen", "vs_5_0", m_lightFullscreenVS);
     compileShader(L"RainLightProxy.hlsl", "VSProxy", "vs_5_0", m_rainProxyVS);
+    compileShader(L"DebugLine.hlsl", "VSMain", "vs_5_0", m_debugLineVS);
+
+    if (!m_geoVS || !m_geoHS || !m_geoDS || !m_geoPS || !m_geoNoTessVS || !m_geoNoTessPS || !m_lightFullscreenVS || !m_rainProxyVS || !m_debugLineVS)
+    {
+        throw std::runtime_error("CreatePSOs: one or more mandatory shader blobs are null after compilation.");
+    }
 
     D3D12_INPUT_ELEMENT_DESC geoLayout[] =
     {
@@ -406,6 +1237,14 @@ void RenderingSystem::CreatePSOs()
     geoDesc.SampleDesc.Count = 1;
 
     RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&geoDesc, IID_PPV_ARGS(&m_geometryPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC geoNoTessDesc = geoDesc;
+    geoNoTessDesc.VS = { m_geoNoTessVS->GetBufferPointer(), m_geoNoTessVS->GetBufferSize() };
+    geoNoTessDesc.HS = {};
+    geoNoTessDesc.DS = {};
+    geoNoTessDesc.PS = { m_geoNoTessPS->GetBufferPointer(), m_geoNoTessPS->GetBufferSize() };
+    geoNoTessDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&geoNoTessDesc, IID_PPV_ARGS(&m_geometryNoTessPSO)));
 
     auto makeFullscreenLightingPso = [&](const char* psEntry, bool additive, ID3D12RootSignature* rootSignature, ComPtr<ID3D12PipelineState>& outPSO)
     {
@@ -474,11 +1313,52 @@ void RenderingSystem::CreatePSOs()
 
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&proxyDesc, IID_PPV_ARGS(&m_psoRainProxy)));
     }
+
+    {
+        ComPtr<ID3DBlob> linePsBlob;
+        compileShader(L"DebugLine.hlsl", "PSMain", "ps_5_0", linePsBlob);
+        D3D12_INPUT_ELEMENT_DESC lineLayout[] =
+        {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        };
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC lineDesc{};
+        lineDesc.InputLayout = { lineLayout, _countof(lineLayout) };
+        lineDesc.pRootSignature = m_debugLineRS.Get();
+        lineDesc.VS = { m_debugLineVS->GetBufferPointer(), m_debugLineVS->GetBufferSize() };
+        lineDesc.PS = { linePsBlob->GetBufferPointer(), linePsBlob->GetBufferSize() };
+        lineDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        lineDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        lineDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        lineDesc.DepthStencilState.DepthEnable = FALSE;
+        lineDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        lineDesc.SampleMask = UINT_MAX;
+        lineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+        lineDesc.NumRenderTargets = 1;
+        lineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        lineDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        lineDesc.SampleDesc.Count = 1;
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&lineDesc, IID_PPV_ARGS(&m_debugLinePSO)));
+    }
 }
 
 void RenderingSystem::SetupSceneLights()
 {
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    {
+        SetupSponzaLights();
+    }
+    else
+    {
+        SetupDirtySceneLights();
+    }
+}
+
+void RenderingSystem::SetupSponzaLights()
+{
     InitializeRainLightSystem();
+    SeedRainLightsForSponza();
 
     m_spotLights.fill(LightingContract::SpotLightData{});
     m_activeSpotLights = 0;
@@ -525,6 +1405,14 @@ void RenderingSystem::SetupSceneLights()
     setSpotLight(2, backSpot);
 }
 
+void RenderingSystem::SetupDirtySceneLights()
+{
+    m_spotLights.fill(LightingContract::SpotLightData{});
+    m_activeSpotLights = 0;
+    m_activePointLightsForGpu.clear();
+    m_activePointLights = 0;
+}
+
 void RenderingSystem::InitializeRainLightSystem()
 {
     m_fallingRainLights.clear();
@@ -538,6 +1426,22 @@ void RenderingSystem::InitializeRainLightSystem()
     m_rainNextSpawnIndex = 1;
     m_rainDebugStats = RainDebugStats{};
     m_rainDebugFrameCounter = 0;
+}
+
+void RenderingSystem::SeedRainLightsForSponza()
+{
+    const UINT seedCount = (std::min)(m_rainReservedRenderableFallingLights, m_rainMaxFallingLights);
+    for (UINT i = 0; i < seedCount; ++i)
+    {
+        SpawnRainLight();
+    }
+
+    for (RainPointLight& light : m_fallingRainLights)
+    {
+        light.Position.y = RS_Lerp(m_rainFloorY, m_rainSpawnY, m_rainUnitDist(m_rainRng));
+    }
+
+    BuildActivePointLightsForGpu();
 }
 
 RenderingSystem::RainPointLight RenderingSystem::GenerateRainLightParameters()
@@ -652,7 +1556,15 @@ void RenderingSystem::BuildActivePointLightsForGpu()
     const size_t maxForGpu = static_cast<size_t>((std::min)(m_rainMaxRenderablePointLights, LightingContract::MaxPointLights));
     const size_t reservedFalling = static_cast<size_t>((std::min)(m_rainReservedRenderableFallingLights, m_rainMaxFallingLights));
 
-    auto appendLight = [this, maxForGpu](const RainPointLight& rain)
+    auto appendPointLight = [this, maxForGpu](const LightingContract::PointLightData& pointLight)
+    {
+        if (m_activePointLightsForGpu.size() >= maxForGpu)
+            return;
+
+        m_activePointLightsForGpu.push_back(pointLight);
+    };
+
+    auto appendRainLight = [this, maxForGpu](const RainPointLight& rain)
     {
         if (m_activePointLightsForGpu.size() >= maxForGpu)
             return;
@@ -665,6 +1577,28 @@ void RenderingSystem::BuildActivePointLightsForGpu()
         m_activePointLightsForGpu.push_back(gpuLight);
     };
 
+    // Sponza uses the complete reference-style light set:
+    // directional light (UpdateFrameConstants), static point lights here,
+    // colored spot lights (SetupSponzaLights), plus the animated rain-light stream below.
+    // Static point lights are inserted before rain so they are never pushed out by the rain pool.
+    UINT staticPointLightCount = 0;
+    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    {
+        const LightingContract::PointLightData sponzaPointLights[] =
+        {
+            { XMFLOAT3(0.0f, 260.0f, 120.0f), 720.0f, XMFLOAT3(0.45f, 0.75f, 1.00f), 1.65f },
+            { XMFLOAT3(-520.0f, 190.0f, -80.0f), 560.0f, XMFLOAT3(1.00f, 0.32f, 0.48f), 1.15f },
+            { XMFLOAT3(520.0f, 190.0f, -80.0f), 560.0f, XMFLOAT3(0.30f, 1.00f, 0.62f), 1.15f },
+            { XMFLOAT3(0.0f, 210.0f, 760.0f), 680.0f, XMFLOAT3(0.32f, 0.46f, 1.00f), 1.25f },
+        };
+
+        for (const LightingContract::PointLightData& pointLight : sponzaPointLights)
+        {
+            appendPointLight(pointLight);
+            ++staticPointLightCount;
+        }
+    }
+
     // Keep descending lights visibly active even with a large grounded pool.
     size_t fallingRendered = 0;
     for (const RainPointLight& falling : m_fallingRainLights)
@@ -672,19 +1606,19 @@ void RenderingSystem::BuildActivePointLightsForGpu()
         if (fallingRendered >= reservedFalling)
             break;
 
-        appendLight(falling);
+        appendRainLight(falling);
         ++fallingRendered;
     }
 
     for (const RainPointLight& grounded : m_groundedRainLights)
     {
-        appendLight(grounded);
+        appendRainLight(grounded);
     }
 
     // Use any remaining GPU budget for additional falling lights.
     for (size_t i = fallingRendered; i < m_fallingRainLights.size(); ++i)
     {
-        appendLight(m_fallingRainLights[i]);
+        appendRainLight(m_fallingRainLights[i]);
     }
 
     m_activePointLights = static_cast<UINT>(m_activePointLightsForGpu.size());
@@ -695,7 +1629,7 @@ void RenderingSystem::BuildActivePointLightsForGpu()
     m_rainDebugStats.TotalSelectedForGpu = m_activePointLights;
 
     const size_t selected = m_activePointLightsForGpu.size();
-    const size_t simulated = m_fallingRainLights.size() + m_groundedRainLights.size();
+    const size_t simulated = m_fallingRainLights.size() + m_groundedRainLights.size() + static_cast<size_t>(staticPointLightCount);
     m_rainDebugStats.ClippedDuringGpuSelection = (simulated > selected)
         ? static_cast<UINT>(simulated - selected)
         : 0;
@@ -717,8 +1651,10 @@ void RenderingSystem::GeometryPass()
     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     cmdList->SetGraphicsRootSignature(m_geometryRS.Get());
-    cmdList->SetPipelineState(m_geometryPSO.Get());
-    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+    cmdList->SetPipelineState(m_useTessellationForScene ? m_geometryPSO.Get() : m_geometryNoTessPSO.Get());
+    cmdList->IASetPrimitiveTopology(m_useTessellationForScene
+        ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
+        : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
     cmdList->IASetIndexBuffer(m_renderer.GetIbView());
 
@@ -753,62 +1689,87 @@ void RenderingSystem::GeometryPass()
     std::uint8_t* transformBase = reinterpret_cast<std::uint8_t*>(transformMapped);
     std::uint8_t* materialBase = reinterpret_cast<std::uint8_t*>(materialMapped);
 
-    for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
+    size_t drawIndex = 0;
+    const bool drawMainModel = m_renderMainSceneModel || m_sceneObjects.empty();
+    const size_t objectCount = drawMainModel ? 1 : m_sceneObjects.size();
+    if (drawMainModel)
+        m_visibleObjectCount = static_cast<UINT>(objectCount);
+
+    for (size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
     {
-        if (subsetIndex >= m_maxObjectCbCount)
-            break;
+        if (!drawMainModel && !m_sceneObjects[objectIndex].Visible)
+            continue;
 
-        const auto& s = subsets[subsetIndex];
-
-        ObjectTransformConstants transform{};
-        XMStoreFloat4x4(&transform.World, XMMatrixTranspose(XMMatrixIdentity()));
-        XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(XMMatrixIdentity()));
-
-        MaterialConstants material{};
-        material.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
-        material.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
-        material.SpecularPower = 32.0f;
-        material.HasTexture = 0;
-        material.HasNormalMap = 0;
-        material.HasDisplacementMap = 0;
-        material.DisplacementScale = 0.0f;
-        material.DisplacementBias = 0.0f;
-
-        UINT textureSrv = 0;
-        if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
+        for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
         {
-            const auto& mat = materials[s.materialIdx];
-            material.MaterialDiffuse = mat.diffuse;
-            material.MaterialSpecular = mat.specular;
-            material.SpecularPower = mat.specPower;
-            if (mat.diffuseSrvHeapIndex >= 0)
+            if (drawIndex >= m_maxObjectCbCount)
+                break;
+
+            const auto& s = subsets[subsetIndex];
+
+            ObjectTransformConstants transform{};
+            if (drawMainModel)
             {
-                material.HasTexture = 1;
-                textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
+                const XMMATRIX identity = XMMatrixIdentity();
+                XMStoreFloat4x4(&transform.World, XMMatrixTranspose(identity));
+                XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(identity));
+                transform.ColorTint = XMFLOAT4(1, 1, 1, 1);
             }
-            if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
+            else
             {
-                material.HasNormalMap = 1;
+                const SceneObject& object = m_sceneObjects[objectIndex];
+                transform.World = object.World;
+                transform.WorldInvTranspose = object.WorldInvTranspose;
+                transform.ColorTint = object.ColorTint;
             }
-            if (mat.displacementSrvHeapIndex >= 0 && mat.hasDisplacementMap)
+
+            MaterialConstants material{};
+            material.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
+            material.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
+            material.SpecularPower = 32.0f;
+            material.HasTexture = 0;
+            material.HasNormalMap = 0;
+            material.HasDisplacementMap = 0;
+            material.DisplacementScale = 0.0f;
+            material.DisplacementBias = 0.0f;
+
+            UINT textureSrv = 0;
+            if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
             {
-                material.HasDisplacementMap = 1;
-                material.DisplacementScale = mat.displacementScale;
-                material.DisplacementBias = mat.displacementBias;
+                const auto& mat = materials[s.materialIdx];
+                material.MaterialDiffuse = mat.diffuse;
+                material.MaterialSpecular = mat.specular;
+                material.SpecularPower = mat.specPower;
+                if (mat.diffuseSrvHeapIndex >= 0)
+                {
+                    material.HasTexture = 1;
+                    textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
+                }
+                if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
+                {
+                    material.HasNormalMap = 1;
+                }
+                if (mat.displacementSrvHeapIndex >= 0 && mat.hasDisplacementMap)
+                {
+                    material.HasDisplacementMap = 1;
+                    material.DisplacementScale = mat.displacementScale;
+                    material.DisplacementBias = mat.displacementBias;
+                }
             }
+
+            const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
+            const UINT materialOffset = static_cast<UINT>(drawIndex * m_materialCbStride);
+
+            memcpy(transformBase + transformOffset, &transform, sizeof(transform));
+            memcpy(materialBase + materialOffset, &material, sizeof(material));
+
+            cmdList->SetGraphicsRootConstantBufferView(0, m_objectTransformCB->GetGPUVirtualAddress() + transformOffset);
+            cmdList->SetGraphicsRootConstantBufferView(1, m_geometryFrameCB->GetGPUVirtualAddress());
+            cmdList->SetGraphicsRootConstantBufferView(2, m_materialCB->GetGPUVirtualAddress() + materialOffset);
+            cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(textureSrv));
+            cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
+            ++drawIndex;
         }
-
-        const UINT transformOffset = static_cast<UINT>(subsetIndex * m_objectTransformCbStride);
-        const UINT materialOffset = static_cast<UINT>(subsetIndex * m_materialCbStride);
-
-        memcpy(transformBase + transformOffset, &transform, sizeof(transform));
-        memcpy(materialBase + materialOffset, &material, sizeof(material));
-
-        cmdList->SetGraphicsRootConstantBufferView(0, m_objectTransformCB->GetGPUVirtualAddress() + transformOffset);
-        cmdList->SetGraphicsRootConstantBufferView(1, m_geometryFrameCB->GetGPUVirtualAddress());
-        cmdList->SetGraphicsRootConstantBufferView(2, m_materialCB->GetGPUVirtualAddress() + materialOffset);
-        cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(textureSrv));
-        cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
     }
 
     m_objectTransformCB->Unmap(0, nullptr);
@@ -821,12 +1782,12 @@ void RenderingSystem::UpdateFrameConstants()
     cb.EyePos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
     cb.ScreenSize = XMFLOAT2(static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()));
     cb.InvScreenSize = XMFLOAT2(1.0f / cb.ScreenSize.x, 1.0f / cb.ScreenSize.y);
-    cb.AmbientColor = XMFLOAT4(0.16f, 0.16f, 0.18f, 1.0f);
+    cb.AmbientColor = m_ambientColor;
 
-    const XMVECTOR dirLight = XMVector3Normalize(XMVectorSet(0.20f, -1.0f, 0.10f, 0.0f));
+    const XMVECTOR dirLight = XMVector3Normalize(XMLoadFloat3(&m_directionalLightDirection));
     XMStoreFloat3(&cb.DirectionalLight.Direction, dirLight);
-    cb.DirectionalLight.Color = XMFLOAT3(0.95f, 0.97f, 1.00f);
-    cb.DirectionalLight.Intensity = 1.35f;
+    cb.DirectionalLight.Color = m_directionalLightColor;
+    cb.DirectionalLight.Intensity = m_directionalLightIntensity;
 
     XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
     XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
@@ -1006,12 +1967,31 @@ void RenderingSystem::RainLightProxyPass()
 
 void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 {
-    (void)totalTime;
     UpdateCamera(deltaTime);
-    UpdateRainLights(deltaTime);
-    BuildActivePointLightsForGpu();
+    if (m_enableFallingLights)
+    {
+        UpdateRainLights(deltaTime);
+        BuildActivePointLightsForGpu();
+    }
+    else
+    {
+        m_activePointLightsForGpu.clear();
+        m_activePointLights = 0;
+        m_rainDebugStats = RainDebugStats{};
+    }
 
     auto cmdList = m_renderer.GetCmdList();
+    if (m_particlesReinitRequested)
+    {
+        m_particles.Reinitialize(cmdList);
+        m_particlesReinitRequested = false;
+    }
+    m_particles.Update(cmdList, deltaTime, totalTime, m_cameraPos, GetParticleEmitterPosition(), GetParticleFountainSettings());
+
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
+    {
+        UpdateObjectVisibility();
+    }
 
     m_gbuffer.BeginGeometryPass(cmdList);
     m_gbuffer.Clear(cmdList);
@@ -1032,9 +2012,26 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
         LightingPassLocal();
     }
 
-    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 8)
+    if (m_enableFallingLights && (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 8))
     {
         RainLightProxyPass();
+    }
+
+    m_particles.Render(
+        cmdList,
+        m_renderer.GetBackBufferRtv(),
+        m_renderer.GetDsvHandle(),
+        m_view,
+        m_proj,
+        m_cameraPos,
+        m_directionalLightDirection,
+        m_directionalLightIntensity,
+        m_directionalLightColor,
+        m_ambientColor);
+
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing && m_enableCulling && m_showCullingDebugGrid)
+    {
+        DebugLinePass();
     }
 
     if (m_rainDebugOutputEnabled)
@@ -1058,6 +2055,11 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
                 m_rainDebugStats.GroundedTrimmedThisFrame);
             OutputDebugStringA(msg);
         }
+    }
+
+    if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
+    {
+        UpdateWindowTitle();
     }
 }
 

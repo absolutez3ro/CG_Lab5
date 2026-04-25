@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 
 static void ThrowIfFailedRenderer(HRESULT hr)
 {
@@ -767,4 +768,80 @@ bool Renderer::LoadObj(const std::string& path)
     WaitForGPU();
 
     return true;
+}
+
+bool Renderer::LoadPrimitiveCubeScene()
+{
+    struct PrimitiveVertex
+    {
+        XMFLOAT3 p;
+        XMFLOAT3 n;
+        XMFLOAT2 uv;
+        XMFLOAT3 t;
+        XMFLOAT3 b;
+    };
+
+    const PrimitiveVertex vertices[] =
+    {
+        {{-0.5f, -0.5f, -0.5f}, {0, 0,-1}, {0,1}, {1,0,0}, {0,1,0}}, {{ 0.5f, -0.5f, -0.5f}, {0, 0,-1}, {1,1}, {1,0,0}, {0,1,0}}, {{ 0.5f,  0.5f, -0.5f}, {0, 0,-1}, {1,0}, {1,0,0}, {0,1,0}}, {{-0.5f,  0.5f, -0.5f}, {0, 0,-1}, {0,0}, {1,0,0}, {0,1,0}},
+        {{-0.5f, -0.5f,  0.5f}, {0, 0, 1}, {0,1}, {-1,0,0}, {0,1,0}}, {{-0.5f,  0.5f,  0.5f}, {0, 0, 1}, {0,0}, {-1,0,0}, {0,1,0}}, {{ 0.5f,  0.5f,  0.5f}, {0, 0, 1}, {1,0}, {-1,0,0}, {0,1,0}}, {{ 0.5f, -0.5f,  0.5f}, {0, 0, 1}, {1,1}, {-1,0,0}, {0,1,0}},
+        {{-0.5f, -0.5f,  0.5f}, {-1,0, 0}, {0,1}, {0,0,-1}, {0,1,0}}, {{-0.5f, -0.5f, -0.5f}, {-1,0, 0}, {1,1}, {0,0,-1}, {0,1,0}}, {{-0.5f,  0.5f, -0.5f}, {-1,0, 0}, {1,0}, {0,0,-1}, {0,1,0}}, {{-0.5f,  0.5f,  0.5f}, {-1,0, 0}, {0,0}, {0,0,-1}, {0,1,0}},
+        {{ 0.5f, -0.5f, -0.5f}, {1, 0, 0}, {0,1}, {0,0,1}, {0,1,0}}, {{ 0.5f, -0.5f,  0.5f}, {1, 0, 0}, {1,1}, {0,0,1}, {0,1,0}}, {{ 0.5f,  0.5f,  0.5f}, {1, 0, 0}, {1,0}, {0,0,1}, {0,1,0}}, {{ 0.5f,  0.5f, -0.5f}, {1, 0, 0}, {0,0}, {0,0,1}, {0,1,0}},
+        {{-0.5f,  0.5f, -0.5f}, {0, 1, 0}, {0,1}, {1,0,0}, {0,0,-1}}, {{ 0.5f,  0.5f, -0.5f}, {0, 1, 0}, {1,1}, {1,0,0}, {0,0,-1}}, {{ 0.5f,  0.5f,  0.5f}, {0, 1, 0}, {1,0}, {1,0,0}, {0,0,-1}}, {{-0.5f,  0.5f,  0.5f}, {0, 1, 0}, {0,0}, {1,0,0}, {0,0,-1}},
+        {{-0.5f, -0.5f,  0.5f}, {0,-1, 0}, {0,1}, {1,0,0}, {0,0,1}}, {{ 0.5f, -0.5f,  0.5f}, {0,-1, 0}, {1,1}, {1,0,0}, {0,0,1}}, {{ 0.5f, -0.5f, -0.5f}, {0,-1, 0}, {1,0}, {1,0,0}, {0,0,1}}, {{-0.5f, -0.5f, -0.5f}, {0,-1, 0}, {0,0}, {1,0,0}, {0,0,1}},
+    };
+
+    const UINT indices[] =
+    {
+        0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+        12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23
+    };
+
+    std::vector<Vertex> verts;
+    verts.reserve(_countof(vertices));
+    for (const auto& v : vertices)
+    {
+        Vertex out{};
+        out.Position = v.p;
+        out.Normal = v.n;
+        out.TexCoord = v.uv;
+        out.Tangent = v.t;
+        out.Bitangent = v.b;
+        verts.push_back(out);
+    }
+
+    m_subsets.clear();
+    MeshSubset s{};
+    s.indexStart = 0;
+    s.indexCount = _countof(indices);
+    s.materialIdx = 0;
+    m_subsets.push_back(s);
+
+    m_gpuMaterials.clear();
+    m_gpuMaterials.resize(1);
+    m_gpuMaterials[0].diffuse = XMFLOAT4(0.72f, 0.72f, 0.78f, 1.0f);
+    m_gpuMaterials[0].specular = XMFLOAT4(1, 1, 1, 1);
+    m_gpuMaterials[0].specPower = 32.0f;
+    m_gpuMaterials[0].diffuseSrvHeapIndex = 0;
+    m_gpuMaterials[0].normalSrvHeapIndex = 0;
+    m_gpuMaterials[0].displacementSrvHeapIndex = 0;
+    m_gpuMaterials[0].hasNormalMap = false;
+    m_gpuMaterials[0].hasDisplacementMap = false;
+
+    CreateBuffer(verts.data(), static_cast<UINT>(verts.size() * sizeof(Vertex)), &m_vertexBuffer);
+    CreateBuffer(indices, sizeof(indices), &m_indexBuffer);
+
+    m_vbView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+    m_vbView.StrideInBytes = sizeof(Vertex);
+    m_vbView.SizeInBytes = static_cast<UINT>(verts.size() * sizeof(Vertex));
+
+    m_ibView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+    m_ibView.Format = DXGI_FORMAT_R32_UINT;
+    m_ibView.SizeInBytes = sizeof(indices);
+    return true;
+}
+
+bool Renderer::LoadMassPrimitiveScene()
+{
+    return LoadPrimitiveCubeScene();
 }
