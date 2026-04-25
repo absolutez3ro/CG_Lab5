@@ -8,7 +8,7 @@ struct Particle
     float Size;
     float Weight;
     float Age;
-    float Padding;
+    float Rotation;
 };
 
 struct SortEntry
@@ -33,6 +33,7 @@ cbuffer Cb : register(b0)
     float4 C3;
     float4 C4;
     float4 C5;
+    float4 C6;
 };
 
 float HashFloat(uint x)
@@ -85,6 +86,7 @@ void EmitCS(uint3 DTid : SV_DispatchThreadID)
     uint seed = asuint(C3.w);
     float4 colorA = C4;
     float4 colorB = C5;
+    float emitterRadius = C6.x;
 
     if (i >= emitCount) return;
 
@@ -96,10 +98,16 @@ void EmitCS(uint3 DTid : SV_DispatchThreadID)
     float rx = HashFloat(h0) * 2.0 - 1.0;
     float ry = HashFloat(h1) * 2.0 - 1.0;
     float rz = HashFloat(h2) * 2.0 - 1.0;
+    float rand0 = HashFloat(h0 ^ 0x68e31da4u);
+    float rand1 = HashFloat(h1 ^ 0xb5297a4du);
+    float randY = HashFloat(h2 ^ 0x1b56c4e9u);
     float t = HashFloat(h2 ^ 0x9e3779b9u);
+    float angle = rand0 * 6.2831853;
+    float radius = sqrt(rand1) * emitterRadius;
+    float3 spawnOffset = float3(cos(angle) * radius, randY * 3.0, sin(angle) * radius);
 
     Particle p;
-    p.Position = emitter + float3(rx, ry, rz) * 2.5;
+    p.Position = emitter + spawnOffset;
     p.Velocity = baseVel + float3(rx * velRnd.x, abs(ry) * velRnd.y, rz * velRnd.z);
     p.LifeSpan = lerp(minLife, maxLife, t);
     p.Life = p.LifeSpan;
@@ -107,7 +115,7 @@ void EmitCS(uint3 DTid : SV_DispatchThreadID)
     p.Size = lerp(minSize, maxSize, HashFloat(h1 ^ 0x85ebca6bu));
     p.Weight = 0.7 + HashFloat(h2 ^ 0xc2b2ae35u) * 0.8;
     p.Age = 0.0;
-    p.Padding = 0.0;
+    p.Rotation = HashFloat(h0 ^ 0x27d4eb2du) * 6.2831853;
 
     g_Particles[deadIndex] = p;
 }

@@ -1,11 +1,13 @@
 #include "ParticleSystemGPU.h"
 #include "d3dx12.h"
+#include "TextureLoader.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <sstream>
 #include <vector>
 #include <cwchar>
 #include <cstdio>
+#include <filesystem>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -118,13 +120,28 @@ bool ParticleSystemGPU::CreateRootSignatures()
     PS_ThrowIfFailed(device->CreateRootSignature(0, ser->GetBufferPointer(), ser->GetBufferSize(), IID_PPV_ARGS(&m_computeRS)), "CS RS create failed");
 
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
     CD3DX12_ROOT_PARAMETER renderParams[2];
     renderParams[0].InitAsConstantBufferView(0);
-    renderParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_VERTEX);
+    renderParams[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
+
+    D3D12_STATIC_SAMPLER_DESC smokeSampler{};
+    smokeSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    smokeSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    smokeSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    smokeSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    smokeSampler.MipLODBias = 0.0f;
+    smokeSampler.MaxAnisotropy = 1;
+    smokeSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    smokeSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    smokeSampler.MinLOD = 0.0f;
+    smokeSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    smokeSampler.ShaderRegister = 0;
+    smokeSampler.RegisterSpace = 0;
+    smokeSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     CD3DX12_ROOT_SIGNATURE_DESC rsDesc;
-    rsDesc.Init(_countof(renderParams), renderParams, 0, nullptr,
+    rsDesc.Init(_countof(renderParams), renderParams, 1, &smokeSampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ser.Reset(); err.Reset();
@@ -166,9 +183,20 @@ bool ParticleSystemGPU::CreatePipelines()
     gps.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
     gps.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     gps.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    D3D12_RENDER_TARGET_BLEND_DESC blend{};
+    blend.BlendEnable = TRUE;
+    blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOp = D3D12_BLEND_OP_ADD;
+    blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    gps.BlendState.RenderTarget[0] = blend;
     gps.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     gps.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     gps.DepthStencilState.DepthEnable = TRUE;
+    gps.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     gps.SampleMask = UINT_MAX;
     gps.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     gps.NumRenderTargets = 1;
@@ -184,7 +212,7 @@ bool ParticleSystemGPU::CreateResources()
     auto device = m_renderer->GetDevice();
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-    heapDesc.NumDescriptors = 8;
+    heapDesc.NumDescriptors = 9;
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     PS_ThrowIfFailed(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_particleHeap)), "Particle heap failed");
@@ -265,7 +293,77 @@ bool ParticleSystemGPU::CreateResources()
     srv.Buffer.NumElements = MaxParticles;
     srv.Buffer.StructureByteStride = sizeof(ParticleSortEntry);
     device->CreateShaderResourceView(m_sortList.Get(), &srv, handle); //4 t1
+    handle.ptr += m_descSize;
 
+    // t2: smoke texture SRV is created lazily in CreateSmokeTexture once a command list is available.
+
+    return true;
+}
+
+bool ParticleSystemGPU::CreateSmokeTexture(ID3D12GraphicsCommandList* cmdList)
+{
+    if (m_smokeTextureLoaded)
+        return true;
+    if (!cmdList || !m_renderer)
+        return false;
+
+    const std::string exeDir = GetExeDir();
+    const std::vector<std::string> candidates = {
+        "assets/smoke.png",
+        "assets/smoke_particle.png",
+        "assets/particle_smoke.png",
+        "assets/particles/smoke.png"
+    };
+
+    TextureLoader::TextureData smokeData{};
+    bool loadedFromFile = false;
+    for (const std::string& relPath : candidates)
+    {
+        const std::string fullPath = exeDir + relPath;
+        if (!std::filesystem::exists(fullPath))
+            continue;
+
+        const std::wstring fullPathW(fullPath.begin(), fullPath.end());
+        if (TextureLoader::LoadFromFile(fullPathW, smokeData))
+        {
+            loadedFromFile = true;
+            std::string msg = "[Particles] Smoke texture loaded: " + fullPath + "\n";
+            OutputDebugStringA(msg.c_str());
+            break;
+        }
+    }
+
+    if (!loadedFromFile)
+    {
+        // Fallback if no smoke PNG was found in assets; replace with your file if needed.
+        smokeData.width = 1;
+        smokeData.height = 1;
+        smokeData.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        smokeData.rowPitch = 4;
+        smokeData.pixels = { 255, 255, 255, 255 };
+        OutputDebugStringA("[Particles] Smoke texture not found, using 1x1 fallback. Put texture at assets/particles/smoke.png\n");
+    }
+
+    if (!TextureLoader::CreateTexture(
+        m_renderer->GetDevice(),
+        cmdList,
+        smokeData,
+        m_smokeTexture,
+        m_smokeTextureUpload))
+    {
+        OutputDebugStringA("[Particles] Failed to create smoke texture resource\n");
+        return false;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC smokeSrv{};
+    smokeSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    smokeSrv.Format = smokeData.format;
+    smokeSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    smokeSrv.Texture2D.MipLevels = 1;
+
+    auto smokeSrvHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(m_particleHeap->GetCPUDescriptorHandleForHeapStart(), 5, m_descSize);
+    m_renderer->GetDevice()->CreateShaderResourceView(m_smokeTexture.Get(), &smokeSrv, smokeSrvHandle); //5 t2
+    m_smokeTextureLoaded = true;
     return true;
 }
 
@@ -401,6 +499,11 @@ void ParticleSystemGPU::Update(ID3D12GraphicsCommandList* cmdList, float deltaTi
     if (!m_initialized)
         return;
 
+    if (!m_smokeTextureLoaded)
+    {
+        CreateSmokeTexture(cmdList);
+    }
+
     if ((m_frameCounter % 240u) == 0)
     {
         OutputDebugStringA(m_sortEnabled ? "[Particles] Sort enabled\n" : "[Particles] Sort disabled\n");
@@ -435,6 +538,7 @@ void ParticleSystemGPU::Update(ID3D12GraphicsCommandList* cmdList, float deltaTi
         emit.RandomSeed = 1337u + m_frameCounter;
         emit.StartColorA = settings.StartColorA;
         emit.StartColorB = settings.StartColorB;
+        emit.EmitterRadius = settings.EmitterRadius;
 
         void* mapped = nullptr;
         m_emitCB->Map(0, nullptr, &mapped);

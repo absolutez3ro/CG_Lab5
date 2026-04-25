@@ -12,7 +12,7 @@ class App
 public:
     bool Init(HINSTANCE hInstance)
     {
-        if (!m_window.Init(hInstance, 1280, 720, L"Deferred Renderer - Dirty Scene"))
+        if (!m_window.Init(hInstance, 1280, 720, L"[SPONZA] Deferred Renderer"))
             return false;
 
         if (!m_renderer.Init(m_window.GetHWND(),

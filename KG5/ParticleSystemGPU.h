@@ -17,7 +17,7 @@ public:
         float Size;
         float Weight;
         float Age;
-        float Padding;
+        float Rotation;
     };
 
     struct alignas(16) ParticleSortEntry
@@ -43,6 +43,7 @@ public:
         float MaxLifeSpan = 4.5f;
         float MinSize = 1.6f;
         float MaxSize = 4.0f;
+        float EmitterRadius = 2.5f;
         float GroundY = -10.0f;
         uint32_t EmitPerFrame = 48;
         uint32_t EnableGroundCollision = 1;
@@ -75,7 +76,7 @@ public:
     uint32_t GetAliveCountForDraw() const { return m_aliveCountForDraw; }
 
 private:
-    static constexpr uint32_t MaxParticles = 4096;
+    static constexpr uint32_t MaxParticles = 8192;
     static constexpr uint32_t ThreadsPerGroup = 256;
 
     struct alignas(16) ParticleEmitConstants
@@ -92,6 +93,10 @@ private:
         uint32_t RandomSeed;
         DirectX::XMFLOAT4 StartColorA;
         DirectX::XMFLOAT4 StartColorB;
+        float EmitterRadius;
+        float EmitPadding0;
+        float EmitPadding1;
+        float EmitPadding2;
     };
 
     struct alignas(16) ParticleUpdateConstants
@@ -137,6 +142,7 @@ private:
     bool CreateRootSignatures();
     bool CreatePipelines();
     bool CreateResources();
+    bool CreateSmokeTexture(ID3D12GraphicsCommandList* cmdList);
     bool CreateQuadGeometry();
     bool CompileShader(const wchar_t* file, const char* entry, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& outBlob);
     std::string GetExeDir() const;
@@ -189,6 +195,10 @@ private:
     D3D12_RESOURCE_STATES m_particlePoolState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES m_deadListState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES m_sortListState = D3D12_RESOURCE_STATE_COMMON;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_smokeTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_smokeTextureUpload;
+    bool m_smokeTextureLoaded = false;
 };
 
 static_assert(sizeof(ParticleSystemGPU::GpuParticle) == 64, "GpuParticle layout must match HLSL.");

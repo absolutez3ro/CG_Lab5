@@ -114,12 +114,24 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         m_renderer.GetSrvDescriptorSize());
     m_renderer.GetDevice()->CreateShaderResourceView(m_pointLightsDefaultBuffer.Get(), &pointLightsSrvDesc, pointLightsSrvCpuHandle);
 
-        if (!LoadMassPrimitiveScene())
-            return false;
-
         if (!m_particles.Initialize(&m_renderer))
             return false;
-        m_particlesReinitRequested = true;
+
+        // Start directly in Sponza for Lab6 smoke check. If load fails, fall back to Dirty scene.
+        m_activeSceneKind = DemoSceneKind::DirtyInstancing;
+        if (!SwitchToSponzaScene())
+        {
+            MessageBoxA(
+                hwnd,
+                "Failed to load Sponza on startup. Falling back to Dirty scene.",
+                "Startup Scene Warning",
+                MB_OK | MB_ICONWARNING);
+
+            // Force full Dirty scene switch path (do not early-return on same-scene guard).
+            m_activeSceneKind = DemoSceneKind::Sponza;
+            if (!SwitchToDirtyScene())
+                return false;
+        }
 
         m_initialized = true;
         UpdateWindowTitle();
@@ -349,20 +361,20 @@ ParticleSystemGPU::FountainSettings RenderingSystem::GetParticleFountainSettings
 
     if (m_activeSceneKind == DemoSceneKind::Sponza)
     {
-        // Larger and brighter than the Dirty-scene particles, so the fountain is obvious during demonstration.
-        // 18 * about 3 seconds * 60 FPS keeps the pool below 4096 live particles.
-        settings.EmitPerFrame = 18;
-        settings.BaseVelocity = XMFLOAT3(0.0f, 82.0f, 16.0f);
-        settings.VelocityRandomness = XMFLOAT3(38.0f, 22.0f, 38.0f);
-        settings.Gravity = XMFLOAT3(0.0f, -38.0f, 0.0f);
-        settings.MinLifeSpan = 2.2f;
-        settings.MaxLifeSpan = 3.4f;
-        settings.MinSize = 5.0f;
-        settings.MaxSize = 10.0f;
+        // Smoke fountain setup for Lab6 demonstration in Sponza.
+        settings.EmitPerFrame = 14;
+        settings.BaseVelocity = XMFLOAT3(0.0f, 8.5f, 0.0f);
+        settings.VelocityRandomness = XMFLOAT3(16.0f, 6.0f, 16.0f);
+        settings.Gravity = XMFLOAT3(0.0f, 0.45f, 0.0f);
+        settings.MinLifeSpan = 4.0f;
+        settings.MaxLifeSpan = 7.0f;
+        settings.MinSize = 14.0f;
+        settings.MaxSize = 34.0f;
+        settings.EmitterRadius = 18.0f;
         settings.GroundY = 0.0f;
         settings.EnableGroundCollision = 1;
-        settings.StartColorA = XMFLOAT4(1.0f, 0.75f, 0.18f, 1.0f);
-        settings.StartColorB = XMFLOAT4(0.25f, 0.65f, 1.0f, 1.0f);
+        settings.StartColorA = XMFLOAT4(0.58f, 0.58f, 0.58f, 0.085f);
+        settings.StartColorB = XMFLOAT4(0.25f, 0.25f, 0.25f, 0.025f);
         return settings;
     }
 
@@ -385,6 +397,11 @@ ParticleSystemGPU::FountainSettings RenderingSystem::GetParticleFountainSettings
 
 void RenderingSystem::RequestSceneSwitch(DemoSceneKind scene)
 {
+    if (scene == m_activeSceneKind)
+        return;
+    if (m_pendingSceneSwitch.has_value() && *m_pendingSceneSwitch == scene)
+        return;
+
     if (scene == DemoSceneKind::Sponza)
         OutputDebugStringA("[SceneSwitch] Request Sponza\n");
     else
