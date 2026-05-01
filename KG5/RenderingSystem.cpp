@@ -224,6 +224,23 @@ void RenderingSystem::ApplyDirtySceneSettings()
     m_directionalLightIntensity = 2.20f;
 }
 
+
+void RenderingSystem::ApplyPerlinPlaneSceneSettings()
+{
+    m_cameraPos = XMFLOAT3(0.0f, 110.0f, -240.0f);
+    m_yaw = 0.0f;
+    m_pitch = -0.28f;
+    m_moveSpeed = 220.0f;
+    m_tessMinFactor = 8.0f;
+    m_tessMaxFactor = 16.0f;
+    m_tessMinDistance = 20.0f;
+    m_tessMaxDistance = 500.0f;
+    m_ambientColor = XMFLOAT4(0.18f, 0.20f, 0.24f, 1.0f);
+    m_directionalLightDirection = XMFLOAT3(0.18f, -1.0f, 0.15f);
+    m_directionalLightColor = XMFLOAT3(0.95f, 0.98f, 1.00f);
+    m_directionalLightIntensity = 1.8f;
+}
+
 bool RenderingSystem::SwitchToSponzaScene()
 {
     if (m_activeSceneKind == DemoSceneKind::Sponza)
@@ -308,6 +325,35 @@ bool RenderingSystem::SwitchToDirtyScene()
     return true;
 }
 
+
+bool RenderingSystem::SwitchToPerlinPlaneScene()
+{
+    if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
+        return true;
+
+    m_renderer.WaitForIdle();
+    m_activeSceneKind = DemoSceneKind::PerlinPlane;
+    m_renderMainSceneModel = false;
+    m_useTessellationForScene = true;
+    m_enableFallingLights = false;
+    m_enableGroundPlane = false;
+    m_showCullingDebugGrid = false;
+    m_debugStrongDisplacement = 1;
+    m_geometryDebugMode = 0;
+
+    if (!m_renderer.LoadPrimitivePlaneScene())
+        return false;
+
+    BuildSingleMainSceneObject();
+    ApplyPerlinPlaneSceneSettings();
+    SetupSceneLights();
+    m_particlesReinitRequested = true;
+    UpdateViewMatrix();
+    UpdateWindowTitle();
+    m_renderer.WaitForIdle();
+    return true;
+}
+
 void RenderingSystem::UpdateWindowTitle() const
 {
     if (!m_hwnd)
@@ -324,7 +370,7 @@ void RenderingSystem::UpdateWindowTitle() const
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
         SetWindowTextW(m_hwnd, title);
     }
-    else
+    else if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
     {
         wchar_t title[320];
         const wchar_t* modeLabel = L"[NO CULLING]";
@@ -341,6 +387,16 @@ void RenderingSystem::UpdateWindowTitle() const
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
         SetWindowTextW(m_hwnd, title);
     }
+    else
+    {
+        wchar_t title[256];
+        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | Particles: %u %s %s",
+            m_perlinNoiseSeed,
+            m_particles.GetAliveCountForDraw(),
+            m_particles.IsEnabled() ? L"ON" : L"OFF",
+            m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+        SetWindowTextW(m_hwnd, title);
+    }
 }
 
 XMFLOAT3 RenderingSystem::GetParticleEmitterPosition() const
@@ -350,6 +406,11 @@ XMFLOAT3 RenderingSystem::GetParticleEmitterPosition() const
         // Demo fountain inside Sponza, in front of the default camera.
         // This position is low enough to read as a fountain instead of floating particles.
         return XMFLOAT3(0.0f, 24.0f, -85.0f);
+    }
+    if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
+    {
+        // Keep particles away from center so plane relief stays visible.
+        return XMFLOAT3(-220.0f, 24.0f, -140.0f);
     }
 
     return XMFLOAT3(0.0f, 40.0f, 0.0f);
@@ -404,6 +465,8 @@ void RenderingSystem::RequestSceneSwitch(DemoSceneKind scene)
 
     if (scene == DemoSceneKind::Sponza)
         OutputDebugStringA("[SceneSwitch] Request Sponza\n");
+    else if (scene == DemoSceneKind::PerlinPlane)
+        OutputDebugStringA("[SceneSwitch] Request PerlinPlane\n");
     else
         OutputDebugStringA("[SceneSwitch] Request Dirty\n");
 
@@ -423,6 +486,8 @@ bool RenderingSystem::ApplyPendingSceneSwitchIfNeeded()
 
     if (requested == DemoSceneKind::Sponza)
         return SwitchToSponzaScene();
+    if (requested == DemoSceneKind::PerlinPlane)
+        return SwitchToPerlinPlaneScene();
 
     return SwitchToDirtyScene();
 }
@@ -788,6 +853,11 @@ void RenderingSystem::OnKeyDown(WPARAM key)
         RequestSceneSwitch(DemoSceneKind::DirtyInstancing);
         return;
     }
+    if (key == 'C')
+    {
+        RequestSceneSwitch(DemoSceneKind::PerlinPlane);
+        return;
+    }
 
     if (key == 'W') m_moveForward = true;
     if (key == 'S') m_moveBackward = true;
@@ -810,6 +880,14 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'I')
     {
         m_particlesReinitRequested = true;
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'L' && m_activeSceneKind == DemoSceneKind::PerlinPlane)
+    {
+        std::mt19937 rng(static_cast<uint32_t>(std::random_device{}()));
+        std::uniform_int_distribution<int> dist(1, 1000000);
+        m_perlinNoiseSeed = static_cast<float>(dist(rng));
         UpdateWindowTitle();
         return;
     }
@@ -1686,6 +1764,8 @@ void RenderingSystem::GeometryPass()
     frame.TessDistanceRange = XMFLOAT2(m_tessMinDistance, m_tessMaxDistance);
     frame.GeometryDebugMode = m_geometryDebugMode;
     frame.DebugStrongDisplacement = m_debugStrongDisplacement;
+    frame.UseProceduralDisplacement = (m_activeSceneKind == DemoSceneKind::PerlinPlane) ? 1u : 0u;
+    frame.ProceduralNoiseSeed = m_perlinNoiseSeed;
 
     void* frameMapped = nullptr;
     m_geometryFrameCB->Map(0, nullptr, &frameMapped);

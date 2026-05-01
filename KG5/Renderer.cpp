@@ -841,6 +841,50 @@ bool Renderer::LoadPrimitiveCubeScene()
     return true;
 }
 
+bool Renderer::LoadPrimitivePlaneScene()
+{
+    const float half = 600.0f;
+    const Vertex vertices[] =
+    {
+        { XMFLOAT3(-half, 0.0f, -half), XMFLOAT3(0,1,0), XMFLOAT2(0,1), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3( half, 0.0f, -half), XMFLOAT3(0,1,0), XMFLOAT2(1,1), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3( half, 0.0f,  half), XMFLOAT3(0,1,0), XMFLOAT2(1,0), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3(-half, 0.0f,  half), XMFLOAT3(0,1,0), XMFLOAT2(0,0), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+    };
+
+    const UINT indices[] = { 0,2,1, 0,3,2 };
+
+    m_subsets.clear();
+    MeshSubset subset{};
+    subset.indexStart = 0;
+    subset.indexCount = _countof(indices);
+    subset.materialIdx = 0;
+    m_subsets.push_back(subset);
+
+    m_gpuMaterials.clear();
+    m_gpuMaterials.resize(1);
+    m_gpuMaterials[0].diffuse = XMFLOAT4(0.55f, 0.65f, 0.72f, 1.0f);
+    m_gpuMaterials[0].specular = XMFLOAT4(0.7f, 0.7f, 0.7f, 1.0f);
+    m_gpuMaterials[0].specPower = 24.0f;
+    m_gpuMaterials[0].diffuseSrvHeapIndex = 0;
+    m_gpuMaterials[0].normalSrvHeapIndex = 0;
+    m_gpuMaterials[0].displacementSrvHeapIndex = 0;
+    m_gpuMaterials[0].hasNormalMap = false;
+    m_gpuMaterials[0].hasDisplacementMap = false;
+
+    CreateBuffer(vertices, sizeof(vertices), &m_vertexBuffer);
+    CreateBuffer(indices, sizeof(indices), &m_indexBuffer);
+
+    m_vbView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+    m_vbView.StrideInBytes = sizeof(Vertex);
+    m_vbView.SizeInBytes = sizeof(vertices);
+
+    m_ibView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+    m_ibView.Format = DXGI_FORMAT_R32_UINT;
+    m_ibView.SizeInBytes = sizeof(indices);
+    return true;
+}
+
 bool Renderer::LoadMassPrimitiveScene()
 {
     return LoadPrimitiveCubeScene();

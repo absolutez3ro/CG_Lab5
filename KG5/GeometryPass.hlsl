@@ -19,7 +19,8 @@ cbuffer GeometryFrameConstants : register(b1)
     float2 gTessDistanceRange;
     uint gGeometryDebugMode;
     uint gDebugStrongDisplacement;
-    float2 gGeometryFramePad;
+    uint gUseProceduralDisplacement;
+    float gProceduralNoiseSeed;
 };
 
 cbuffer MaterialConstants : register(b2)
@@ -78,6 +79,32 @@ struct PSOutput
     float4 Normal   : SV_Target1;
     float4 Material : SV_Target2;
 };
+
+
+float2 hash2(float2 p)
+{
+    p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+    return frac(sin(p) * 43758.5453);
+}
+
+float perlin2d(float2 p)
+{
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+
+    float2 g00 = normalize(hash2(i + float2(0,0)) * 2.0 - 1.0);
+    float2 g10 = normalize(hash2(i + float2(1,0)) * 2.0 - 1.0);
+    float2 g01 = normalize(hash2(i + float2(0,1)) * 2.0 - 1.0);
+    float2 g11 = normalize(hash2(i + float2(1,1)) * 2.0 - 1.0);
+
+    float n00 = dot(g00, f - float2(0,0));
+    float n10 = dot(g10, f - float2(1,0));
+    float n01 = dot(g01, f - float2(0,1));
+    float n11 = dot(g11, f - float2(1,1));
+
+    return lerp(lerp(n00, n10, u.x), lerp(n01, n11, u.x), u.y);
+}
 
 VSOutput VSMain(VSInput vin)
 {
@@ -174,7 +201,22 @@ DSOutput DSMain(
         patch[1].BitangentW * bary.y +
         patch[2].BitangentW * bary.z);
 
-    if (gHasDisplacementMap != 0)
+    if (gUseProceduralDisplacement != 0)
+    {
+        const float2 noiseUv = basePositionW.xz * 0.035f + gProceduralNoiseSeed * 0.001f;
+        const float displacement = perlin2d(noiseUv) * 52.0f;
+        displacedPositionW += normalW * displacement;
+
+        const float eps = 0.85f;
+        const float2 uvDx = (basePositionW.xz + float2(eps, 0.0f)) * 0.035f + gProceduralNoiseSeed * 0.001f;
+        const float2 uvDz = (basePositionW.xz + float2(0.0f, eps)) * 0.035f + gProceduralNoiseSeed * 0.001f;
+        const float hDx = perlin2d(uvDx) * 52.0f;
+        const float hDz = perlin2d(uvDz) * 52.0f;
+        const float3 tx = float3(eps, hDx - displacement, 0.0f);
+        const float3 tz = float3(0.0f, hDz - displacement, eps);
+        normalW = normalize(cross(tz, tx));
+    }
+    else if (gHasDisplacementMap != 0)
     {
         float displacementTex = gDisplacementMap.SampleLevel(gSampler, texCoord, 0).r;
         float centeredDisplacement = displacementTex * 2.0f - 1.0f;
@@ -202,6 +244,14 @@ PSOutput PSMain(DSOutput pin)
     PSOutput o;
     float4 albedo = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord) : gMaterialDiffuse;
     albedo.rgb *= pin.ColorTint.rgb;
+
+    if (gUseProceduralDisplacement != 0)
+    {
+        const float h = saturate((pin.PositionW.y + 52.0f) / 104.0f);
+        const float3 lowColor = float3(0.11f, 0.30f, 0.18f);
+        const float3 highColor = float3(0.66f, 0.74f, 0.52f);
+        albedo.rgb = lerp(lowColor, highColor, h);
+    }
     float3 n = normalize(pin.NormalW);
 
     if (gHasNormalMap != 0)

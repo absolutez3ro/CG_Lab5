@@ -44,7 +44,8 @@ struct GeometryFrameConstants
     XMFLOAT2 TessDistanceRange;
     UINT GeometryDebugMode = 0;
     UINT DebugStrongDisplacement = 1;
-    UINT GeometryFramePad[2] = { 0, 0 };
+    UINT UseProceduralDisplacement = 0;
+    float ProceduralNoiseSeed = 0.0f;
 };
 
 struct MaterialConstants
@@ -93,6 +94,7 @@ public:
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
     bool LoadPrimitiveCubeScene();
+    bool LoadPrimitivePlaneScene();
     bool LoadMassPrimitiveScene();
     void WaitForIdle() { WaitForGPU(); }
 

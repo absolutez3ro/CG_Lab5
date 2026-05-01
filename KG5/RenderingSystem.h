@@ -26,7 +26,8 @@ public:
     enum class DemoSceneKind
     {
         DirtyInstancing,
-        Sponza
+        Sponza,
+        PerlinPlane
     };
 
     bool Init(HWND hwnd, int width, int height);
@@ -37,6 +38,7 @@ public:
     bool LoadObj(const std::string& path) { return m_renderer.LoadObj(path); }
     bool SwitchToSponzaScene();
     bool SwitchToDirtyScene();
+    bool SwitchToPerlinPlaneScene();
     DemoSceneKind GetActiveSceneKind() const { return m_activeSceneKind; }
     void RequestSceneSwitch(DemoSceneKind scene);
     bool ApplyPendingSceneSwitchIfNeeded();
@@ -96,6 +98,7 @@ private:
     bool TryLoadSponzaWithFallbacks();
     void ApplySponzaSceneSettings();
     void ApplyDirtySceneSettings();
+    void ApplyPerlinPlaneSceneSettings();
 
     void GeometryPass();
     void LightingPassDirectional();
@@ -200,6 +203,7 @@ private:
     float m_tessMaxFactor = 1.0f;
     float m_tessMinDistance = 5.0f;
     float m_tessMaxDistance = 80.0f;
+    float m_perlinNoiseSeed = 1.0f;
 
     bool m_moveForward = false;
     bool m_moveBackward = false;
