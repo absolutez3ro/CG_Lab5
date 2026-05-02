@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <sstream>
 #include <vector>
+#include <filesystem>
 
 using namespace DirectX;
 
@@ -304,6 +305,13 @@ bool RenderingSystem::SwitchToDirtyScene()
     m_sceneObjectCount = 1000;
     m_massPlacementMode = MassPlacementMode::Grid;
     m_showCullingDebugGrid = m_enableCulling;
+    m_billboardInitAttempted = false;
+    m_billboardReady = false;
+    m_billboardTextureSrv = -1;
+    m_billboardVertexBuffer.Reset();
+    m_billboardIndexBuffer.Reset();
+    m_billboardVbView = {};
+    m_billboardIbView = {};
     ApplyDirtySceneSettings();
     m_activePointLightsForGpu.clear();
     m_activePointLights = 0;
@@ -315,6 +323,12 @@ bool RenderingSystem::SwitchToDirtyScene()
     }
     SetupSceneLights();
     RebuildCullingDebugLines();
+
+    // Prepare billboard resources before the frame command list is opened.
+    // EnsureBillboardResources() may load a texture and reset/close the renderer command list,
+    // so it must not be called from GeometryPass().
+    EnsureBillboardResources();
+
     // Restart particles so old Sponza fountain particles do not remain in the Dirty scene.
     m_particlesReinitRequested = true;
     UpdateViewMatrix();
@@ -372,19 +386,24 @@ void RenderingSystem::UpdateWindowTitle() const
     }
     else if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
     {
-        wchar_t title[320];
+        wchar_t title[512];
+
         const wchar_t* modeLabel = L"[NO CULLING]";
         if (m_enableCulling)
             modeLabel = m_useOctreeMode ? L"[OCTREE + GRID]" : L"[FRUSTUM + GRID]";
+
         swprintf_s(
             title,
-            L"%s INSTANCING: %u / %u cubes visible | Particles: %u %s %s",
+            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | Particles: %u %s %s",
             modeLabel,
             m_visibleObjectCount,
             m_sceneObjectCount,
+            m_cubeDrawCount,
+            m_billboardDrawCount,
             m_particles.GetAliveCountForDraw(),
             m_particles.IsEnabled() ? L"ON" : L"OFF",
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+
         SetWindowTextW(m_hwnd, title);
     }
     else
@@ -708,6 +727,87 @@ void RenderingSystem::LogSceneState(const char* stageTag) const
         m_renderer.GetVertexCount(),
         m_useTessellationForScene ? "patch" : "triangle");
     OutputDebugStringA(msg);
+}
+
+bool RenderingSystem::EnsureBillboardResources()
+{
+    if (m_billboardReady)
+        return true;
+
+    if (m_billboardInitAttempted)
+        return false;
+
+    m_billboardInitAttempted = true;
+
+    const Vertex quadVertices[] =
+    {
+        { XMFLOAT3(-0.5f, -0.5f, 0.0f), XMFLOAT3(0, 0, -1), XMFLOAT2(0, 1), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) },
+        { XMFLOAT3(-0.5f,  0.5f, 0.0f), XMFLOAT3(0, 0, -1), XMFLOAT2(0, 0), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) },
+        { XMFLOAT3( 0.5f,  0.5f, 0.0f), XMFLOAT3(0, 0, -1), XMFLOAT2(1, 0), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) },
+        { XMFLOAT3( 0.5f, -0.5f, 0.0f), XMFLOAT3(0, 0, -1), XMFLOAT2(1, 1), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) },
+    };
+
+    const UINT quadIndices[] =
+    {
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    m_renderer.CreateBuffer(quadVertices, sizeof(quadVertices), &m_billboardVertexBuffer);
+    m_renderer.CreateBuffer(quadIndices, sizeof(quadIndices), &m_billboardIndexBuffer);
+
+    if (!m_billboardVertexBuffer || !m_billboardIndexBuffer)
+    {
+        OutputDebugStringA("[Billboard] Failed to create billboard vertex/index buffers\n");
+        return false;
+    }
+
+    m_billboardVbView.BufferLocation = m_billboardVertexBuffer->GetGPUVirtualAddress();
+    m_billboardVbView.StrideInBytes = sizeof(Vertex);
+    m_billboardVbView.SizeInBytes = sizeof(quadVertices);
+
+    m_billboardIbView.BufferLocation = m_billboardIndexBuffer->GetGPUVirtualAddress();
+    m_billboardIbView.Format = DXGI_FORMAT_R32_UINT;
+    m_billboardIbView.SizeInBytes = sizeof(quadIndices);
+
+    if (m_billboardTextureSrv < 0)
+    {
+        const std::filesystem::path exeDir(GetExeDir());
+        const std::filesystem::path candidates[] =
+        {
+            exeDir / "assets" / "billboard.png",
+            exeDir / ".." / "assets" / "billboard.png",
+            exeDir / ".." / ".." / "assets" / "billboard.png",
+            exeDir / ".." / ".." / ".." / "assets" / "billboard.png",
+            std::filesystem::path("assets") / "billboard.png",
+            std::filesystem::path("..") / "assets" / "billboard.png",
+            std::filesystem::path("..") / ".." / "assets" / "billboard.png",
+            std::filesystem::path("..") / ".." / ".." / "assets" / "billboard.png"
+        };
+
+        for (const std::filesystem::path& candidate : candidates)
+        {
+            const std::wstring texPath = candidate.wstring();
+            std::string narrow(texPath.begin(), texPath.end());
+            std::string msg = "[Billboard] Trying texture path: " + narrow + "\n";
+            OutputDebugStringA(msg.c_str());
+
+            m_billboardTextureSrv = m_renderer.LoadTextureToSrv(texPath);
+            if (m_billboardTextureSrv >= 0)
+                break;
+        }
+    }
+
+    if (m_billboardTextureSrv < 0)
+    {
+        OutputDebugStringA("[Billboard] billboard.png was not found. Billboard LOD disabled.\n");
+        m_billboardReady = false;
+        return false;
+    }
+
+    m_billboardReady = true;
+    OutputDebugStringA("[Billboard] Billboard resources ready\n");
+    return true;
 }
 
 void RenderingSystem::CreateDebugLineResources()
@@ -1789,20 +1889,47 @@ void RenderingSystem::GeometryPass()
     size_t drawIndex = 0;
     const bool drawMainModel = m_renderMainSceneModel || m_sceneObjects.empty();
     const size_t objectCount = drawMainModel ? 1 : m_sceneObjects.size();
+
+    m_cubeDrawCount = 0;
+    m_billboardDrawCount = 0;
+
     if (drawMainModel)
         m_visibleObjectCount = static_cast<UINT>(objectCount);
 
+    const XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    const XMVECTOR viewForward = XMVector3Normalize(view.r[2]);
+    const XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, viewForward));
+    const XMVECTOR billboardUp = XMVector3Normalize(XMVector3Cross(viewForward, right));
+
+    // Do not create/load billboard GPU resources from inside GeometryPass.
+    // GeometryPass runs while the frame command list is already open; resetting it here crashes with COMMAND_LIST_OPEN.
+    // Resources are prepared during SwitchToDirtyScene(), before Renderer::BeginFrame().
+    const bool billboardsAllowed = (m_activeSceneKind == DemoSceneKind::DirtyInstancing) && m_billboardReady;
+    m_cubeDrawCount = 0;
+    m_billboardDrawCount = 0;
     for (size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
     {
         if (!drawMainModel && !m_sceneObjects[objectIndex].Visible)
             continue;
 
-        for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
+        const SceneObject* objectPtr = drawMainModel ? nullptr : &m_sceneObjects[objectIndex];
+        bool drawAsBillboard = false;
+        if (billboardsAllowed && objectPtr != nullptr)
+        {
+            const XMVECTOR objectPos = XMLoadFloat3(&objectPtr->BoundsCenter);
+            const XMVECTOR cameraPos = XMLoadFloat3(&m_cameraPos);
+            const float distanceToCamera = XMVectorGetX(XMVector3Length(objectPos - cameraPos));
+            drawAsBillboard = (distanceToCamera >= m_billboardSwitchDistance);
+        }
+
+        const size_t subsetCount = drawAsBillboard ? 1 : subsets.size();
+        for (size_t subsetIndex = 0; subsetIndex < subsetCount; ++subsetIndex)
         {
             if (drawIndex >= m_maxObjectCbCount)
                 break;
 
-            const auto& s = subsets[subsetIndex];
+            const auto& s = subsets[(std::min)(subsetIndex, subsets.size() - 1)];
 
             ObjectTransformConstants transform{};
             if (drawMainModel)
@@ -1812,12 +1939,25 @@ void RenderingSystem::GeometryPass()
                 XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(identity));
                 transform.ColorTint = XMFLOAT4(1, 1, 1, 1);
             }
-            else
+            else if (!drawAsBillboard)
             {
                 const SceneObject& object = m_sceneObjects[objectIndex];
                 transform.World = object.World;
                 transform.WorldInvTranspose = object.WorldInvTranspose;
                 transform.ColorTint = object.ColorTint;
+            }
+            else
+            {
+                XMFLOAT3 center = objectPtr->BoundsCenter;
+                const float scale = objectPtr->BoundsRadius * 2.0f;
+                XMMATRIX world = XMMatrixIdentity();
+                world.r[0] = XMVectorScale(right, scale);
+                world.r[1] = XMVectorScale(billboardUp, scale);
+                world.r[2] = XMVectorScale(viewForward, scale);
+                world.r[3] = XMVectorSet(center.x, center.y, center.z, 1.0f);
+                XMStoreFloat4x4(&transform.World, XMMatrixTranspose(world));
+                XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(XMMatrixInverse(nullptr, world)));
+                transform.ColorTint = objectPtr->ColorTint;
             }
 
             MaterialConstants material{};
@@ -1831,7 +1971,7 @@ void RenderingSystem::GeometryPass()
             material.DisplacementBias = 0.0f;
 
             UINT textureSrv = 0;
-            if (s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
+            if (!drawAsBillboard && s.materialIdx >= 0 && s.materialIdx < static_cast<int>(materials.size()))
             {
                 const auto& mat = materials[s.materialIdx];
                 material.MaterialDiffuse = mat.diffuse;
@@ -1853,6 +1993,13 @@ void RenderingSystem::GeometryPass()
                     material.DisplacementBias = mat.displacementBias;
                 }
             }
+            if (drawAsBillboard)
+            {
+                material.HasTexture = 1;
+                material.HasNormalMap = 0;
+                material.HasDisplacementMap = 0;
+                textureSrv = static_cast<UINT>(m_billboardTextureSrv);
+            }
 
             const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
             const UINT materialOffset = static_cast<UINT>(drawIndex * m_materialCbStride);
@@ -1864,7 +2011,20 @@ void RenderingSystem::GeometryPass()
             cmdList->SetGraphicsRootConstantBufferView(1, m_geometryFrameCB->GetGPUVirtualAddress());
             cmdList->SetGraphicsRootConstantBufferView(2, m_materialCB->GetGPUVirtualAddress() + materialOffset);
             cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(textureSrv));
-            cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
+            if (drawAsBillboard)
+            {
+                cmdList->IASetVertexBuffers(0, 1, &m_billboardVbView);
+                cmdList->IASetIndexBuffer(&m_billboardIbView);
+                cmdList->DrawIndexedInstanced(6, 1, 0, 0, 0);
+                ++m_billboardDrawCount;
+                cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
+                cmdList->IASetIndexBuffer(m_renderer.GetIbView());
+            }
+            else
+            {
+                cmdList->DrawIndexedInstanced(s.indexCount, 1, s.indexStart, 0, 0);
+                ++m_cubeDrawCount;
+            }
             ++drawIndex;
         }
     }
@@ -2162,12 +2322,11 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
 void RenderingSystem::OnResize(int width, int height)
 {
+    // Keep resize path minimal and deterministic to avoid breaking scene/pipeline switches.
     if (!m_initialized)
         return;
-
     if (width <= 0 || height <= 0)
         return;
-
     if (m_renderer.GetSrvHeap() == nullptr)
         return;
 
@@ -2182,9 +2341,11 @@ void RenderingSystem::OnResize(int width, int height)
         m_renderer.GetGbufferSrvGpuStart(),
         m_renderer.GetSrvDescriptorSize());
 
-    if (height > 0)
-    {
-        XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(width) / static_cast<float>(height), 1.0f, 5000.0f);
-        XMStoreFloat4x4(&m_proj, XMMatrixTranspose(proj));
-    }
+    const XMMATRIX proj = XMMatrixPerspectiveFovLH(
+        XMConvertToRadians(60.0f),
+        static_cast<float>(width) / static_cast<float>(height),
+        1.0f,
+        5000.0f);
+    XMStoreFloat4x4(&m_proj, XMMatrixTranspose(proj));
 }
+

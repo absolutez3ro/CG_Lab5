@@ -6,11 +6,13 @@
 
 bool TextureLoader::LoadFromFile(const std::wstring& path, TextureData& out)
 {
-	// Конвертируем wstring в string
-	std::string narrowPath(path.begin(), path.end());
-
 	int w, h, channels;
-	unsigned char* data = stbi_load(narrowPath.c_str(), &w, &h, &channels, 4);
+	FILE* fp = nullptr;
+	if (_wfopen_s(&fp, path.c_str(), L"rb") != 0 || fp == nullptr)
+		return false;
+
+	unsigned char* data = stbi_load_from_file(fp, &w, &h, &channels, 4);
+	fclose(fp);
 	if (!data) return false;
 
 	out.width = (UINT)w;

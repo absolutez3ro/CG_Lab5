@@ -127,6 +127,7 @@ private:
     bool IsSphereVisible(const XMFLOAT3& center, float radius, const FrustumPlanes& frustum) const;
     void OutputDirtySceneStats() const;
     void LogSceneState(const char* stageTag) const;
+    bool EnsureBillboardResources();
     void CreateDebugLineResources();
     void CreateDebugLinePSO();
     void RebuildCullingDebugLines();
@@ -247,6 +248,8 @@ private:
     MassPlacementMode m_massPlacementMode = MassPlacementMode::Grid;
     UINT m_sceneObjectCount = 1000;
     UINT m_visibleObjectCount = 0;
+    UINT m_cubeDrawCount = 0;
+    UINT m_billboardDrawCount = 0;
     UINT m_sceneMaxDrawCallsBudget = 60000;
     XMFLOAT2 m_massPlacementMinXZ = { -360.0f, -360.0f };
     XMFLOAT2 m_massPlacementMaxXZ = { 360.0f, 360.0f };
@@ -258,6 +261,14 @@ private:
     float m_massScaleMin = 7.5f;
     float m_massScaleMax = 14.0f;
     std::vector<SceneObject> m_sceneObjects;
+    ComPtr<ID3D12Resource> m_billboardVertexBuffer;
+    ComPtr<ID3D12Resource> m_billboardIndexBuffer;
+    D3D12_VERTEX_BUFFER_VIEW m_billboardVbView{};
+    D3D12_INDEX_BUFFER_VIEW m_billboardIbView{};
+    int m_billboardTextureSrv = -1;
+    float m_billboardSwitchDistance = 220.0f;
+    bool m_billboardInitAttempted = false;
+    bool m_billboardReady = false;
 
     std::vector<DebugLineVertex> m_debugLineVertices;
     D3D12_VERTEX_BUFFER_VIEW m_debugLineVbView{};

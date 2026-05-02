@@ -1,4 +1,4 @@
-﻿#include "Renderer.h"
+#include "Renderer.h"
 #include <stdexcept>
 #include <filesystem>
 #include <algorithm>
@@ -768,6 +768,70 @@ bool Renderer::LoadObj(const std::string& path)
     WaitForGPU();
 
     return true;
+}
+
+int Renderer::LoadTextureToSrv(const std::wstring& texturePath)
+{
+    if (m_nextSrvIndex >= 256)
+    {
+        OutputDebugStringA("[Billboard] SRV heap is full\n");
+        return -1;
+    }
+
+    TextureLoader::TextureData texData;
+    if (!TextureLoader::LoadFromFile(texturePath, texData))
+    {
+        std::string path(texturePath.begin(), texturePath.end());
+        std::string msg = "[Billboard] Failed to load texture: " + path + "\n";
+        OutputDebugStringA(msg.c_str());
+        return -1;
+    }
+
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<ID3D12Resource> upload;
+
+    ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
+    ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
+
+    if (!TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), texData, texture, upload))
+    {
+        OutputDebugStringA("[Billboard] Failed to create GPU texture\n");
+        ThrowIfFailedRenderer(m_cmdList->Close());
+        ID3D12CommandList* lists[] = { m_cmdList.Get() };
+        m_cmdQueue->ExecuteCommandLists(1, lists);
+        WaitForGPU();
+        return -1;
+    }
+
+    const UINT heapIndex = m_nextSrvIndex++;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = texData.format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        heapIndex,
+        m_cbvSrvDescSize);
+
+    m_device->CreateShaderResourceView(texture.Get(), &srvDesc, cpuHandle);
+
+    ThrowIfFailedRenderer(m_cmdList->Close());
+    ID3D12CommandList* lists[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, lists);
+    WaitForGPU();
+
+    // SRV only stores a descriptor; the underlying resources must stay alive.
+    m_extraTextures.push_back(texture);
+    m_extraTextureUploads.push_back(upload);
+
+    std::string path(texturePath.begin(), texturePath.end());
+    std::string msg = "[Billboard] Loaded texture: " + path + "\n";
+    OutputDebugStringA(msg.c_str());
+
+    return static_cast<int>(heapIndex);
 }
 
 bool Renderer::LoadPrimitiveCubeScene()

@@ -96,6 +96,7 @@ public:
     bool LoadPrimitiveCubeScene();
     bool LoadPrimitivePlaneScene();
     bool LoadMassPrimitiveScene();
+    int LoadTextureToSrv(const std::wstring& texturePath);
     void WaitForIdle() { WaitForGPU(); }
 
     ID3D12Device* GetDevice() { return m_device.Get(); }
@@ -180,6 +181,8 @@ private:
     ComPtr<ID3D12Resource> m_vertexBuffer;
     ComPtr<ID3D12Resource> m_indexBuffer;
     ComPtr<ID3D12Resource> m_defaultWhiteTexture;
+    std::vector<ComPtr<ID3D12Resource>> m_extraTextures;
+    std::vector<ComPtr<ID3D12Resource>> m_extraTextureUploads;
     ComPtr<ID3D12Resource> m_defaultWhiteUpload;
     bool m_forceSponzaDiagnosticMaterialOverride = true;
     ComPtr<ID3D12Resource> m_globalOverrideNormalTexture;
