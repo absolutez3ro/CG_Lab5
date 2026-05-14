@@ -44,8 +44,14 @@ namespace LightingContract
         XMFLOAT2 ScreenSize;
         XMFLOAT2 InvScreenSize;
         XMFLOAT4 AmbientColor;
+        XMFLOAT4X4 View;
         XMFLOAT4X4 InvViewProj;
+        XMFLOAT4X4 ShadowViewProj[4];
+        XMFLOAT4 CascadeSplits;
         DirectionalLightData DirectionalLight;
+        float ShadowMapSize;
+        UINT CascadeCount;
+        UINT EnableShadows;
         UINT PointLightCount;
         UINT SpotLightCount;
         UINT DebugMode;

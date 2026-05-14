@@ -40,8 +40,14 @@ struct LightingFrameConstants
     float2 ScreenSize;
     float2 InvScreenSize;
     float4 AmbientColor;
+    float4x4 View;
     float4x4 InvViewProj;
+    float4x4 ShadowViewProj[4];
+    float4 CascadeSplits;
     DirectionalLightData DirectionalLight;
+    float ShadowMapSize;
+    uint CascadeCount;
+    uint EnableShadows;
     uint PointLightCount;
     uint SpotLightCount;
     uint DebugMode;

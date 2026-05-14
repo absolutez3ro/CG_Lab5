@@ -9,6 +9,7 @@
 #include <sstream>
 #include <vector>
 #include <filesystem>
+#include <limits>
 
 using namespace DirectX;
 
@@ -66,7 +67,9 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         XMLoadFloat3(&m_cameraPos),
         XMVectorSet(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z + 1.0f, 1.0f),
         XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(width) / static_cast<float>(height), 1.0f, 5000.0f);
+    m_cameraNear = 1.0f;
+    m_cameraFar = 5000.0f;
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XMConvertToRadians(60.0f), static_cast<float>(width) / static_cast<float>(height), m_cameraNear, m_cameraFar);
     XMStoreFloat4x4(&m_view, XMMatrixTranspose(view));
     XMStoreFloat4x4(&m_proj, XMMatrixTranspose(proj));
 
@@ -79,13 +82,16 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     m_objectTransformCbStride = (sizeof(ObjectTransformConstants) + 255u) & ~255u;
     m_materialCbStride = (sizeof(MaterialConstants) + 255u) & ~255u;
     m_maxObjectCbCount = 8192;
+    m_shadowFrameCbStride = (sizeof(XMFLOAT4X4) + 255u) & ~255u;
 
     m_renderer.CreateBuffer(nullptr, m_objectTransformCbStride * m_maxObjectCbCount, &m_objectTransformCB);
+    m_renderer.CreateBuffer(nullptr, m_objectTransformCbStride * m_maxObjectCbCount, &m_shadowObjectTransformCB);
     m_renderer.CreateBuffer(nullptr, m_materialCbStride * m_maxObjectCbCount, &m_materialCB);
     m_renderer.CreateBuffer(nullptr, sizeof(GeometryFrameConstants), &m_geometryFrameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LightingFrameConstants), &m_frameCB);
     m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LocalLightConstants), &m_localLightsCB);
     m_renderer.CreateBuffer(nullptr, sizeof(RainProxyFrameConstants), &m_rainProxyFrameCB);
+    m_renderer.CreateBuffer(nullptr, m_shadowFrameCbStride * ShadowCascadeCount, &m_shadowFrameCB);
 
     const UINT pointLightsBufferSize = static_cast<UINT>(sizeof(LightingContract::PointLightData) * LightingContract::MaxPointLights);
     m_renderer.CreateBuffer(nullptr, pointLightsBufferSize, &m_pointLightsUploadBuffer);
@@ -114,6 +120,53 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         PointLightsSrvIndex,
         m_renderer.GetSrvDescriptorSize());
     m_renderer.GetDevice()->CreateShaderResourceView(m_pointLightsDefaultBuffer.Get(), &pointLightsSrvDesc, pointLightsSrvCpuHandle);
+
+    // CSM shadow map Texture2DArray: typeless resource + per-slice DSV + array SRV.
+    D3D12_RESOURCE_DESC shadowDesc{};
+    shadowDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    shadowDesc.Width = ShadowMapResolution;
+    shadowDesc.Height = ShadowMapResolution;
+    shadowDesc.DepthOrArraySize = ShadowCascadeCount;
+    shadowDesc.MipLevels = 1;
+    shadowDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+    shadowDesc.SampleDesc.Count = 1;
+    shadowDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    shadowDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE shadowClear{};
+    shadowClear.Format = DXGI_FORMAT_D32_FLOAT;
+    shadowClear.DepthStencil.Depth = 1.0f;
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    RS_ThrowIfFailed(m_renderer.GetDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &shadowDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &shadowClear, IID_PPV_ARGS(&m_shadowMap)));
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc{};
+    dsvHeapDesc.NumDescriptors = ShadowCascadeCount;
+    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    RS_ThrowIfFailed(m_renderer.GetDevice()->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_shadowDsvHeap)));
+    for (UINT i = 0; i < ShadowCascadeCount; ++i)
+    {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+        dsv.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+        dsv.Texture2DArray.ArraySize = 1;
+        dsv.Texture2DArray.FirstArraySlice = i;
+        m_shadowDsvHandles[i] = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+            m_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart(),
+            i,
+            m_renderer.GetDevice()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV));
+        m_renderer.GetDevice()->CreateDepthStencilView(m_shadowMap.Get(), &dsv, m_shadowDsvHandles[i]);
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrv{};
+    shadowSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    shadowSrv.Format = DXGI_FORMAT_R32_FLOAT;
+    shadowSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    shadowSrv.Texture2DArray.ArraySize = ShadowCascadeCount;
+    shadowSrv.Texture2DArray.MipLevels = 1;
+    auto shadowSrvCpu = CD3DX12_CPU_DESCRIPTOR_HANDLE(m_renderer.GetSrvHeap()->GetCPUDescriptorHandleForHeapStart(), ShadowMapSrvIndex, m_renderer.GetSrvDescriptorSize());
+    m_renderer.GetDevice()->CreateShaderResourceView(m_shadowMap.Get(), &shadowSrv, shadowSrvCpu);
+    // Lighting passes bind their descriptor table at the first GBuffer SRV (heap index 1),
+    // so HLSL register t6 resolves to heap index 7. Keep an alias there for the CSM Texture2DArray.
+    auto shadowSrvT6Cpu = CD3DX12_CPU_DESCRIPTOR_HANDLE(m_renderer.GetSrvHeap()->GetCPUDescriptorHandleForHeapStart(), ShadowMapSrvIndex + 1, m_renderer.GetSrvDescriptorSize());
+    m_renderer.GetDevice()->CreateShaderResourceView(m_shadowMap.Get(), &shadowSrv, shadowSrvT6Cpu);
 
         if (!m_particles.Initialize(&m_renderer))
             return false;
@@ -202,10 +255,12 @@ void RenderingSystem::ApplySponzaSceneSettings()
     m_tessMaxFactor = 20.0f;
     m_tessMinDistance = 5.0f;
     m_tessMaxDistance = 80.0f;
-    m_ambientColor = XMFLOAT4(0.16f, 0.16f, 0.18f, 1.0f);
+    // Brighter baseline for CSM debugging: the previous values made Sponza too dark
+    // when the first shadow pass over-shadowed the directional light.
+    m_ambientColor = XMFLOAT4(0.26f, 0.26f, 0.29f, 1.0f);
     m_directionalLightDirection = XMFLOAT3(0.20f, -1.0f, 0.10f);
-    m_directionalLightColor = XMFLOAT3(0.95f, 0.97f, 1.00f);
-    m_directionalLightIntensity = 1.35f;
+    m_directionalLightColor = XMFLOAT3(0.98f, 0.99f, 1.00f);
+    m_directionalLightIntensity = 2.40f;
 }
 
 void RenderingSystem::ApplyDirtySceneSettings()
@@ -378,7 +433,9 @@ void RenderingSystem::UpdateWindowTitle() const
         wchar_t title[256];
         swprintf_s(
             title,
-            L"[SPONZA] Deferred Renderer | Particles: %u %s %s",
+            L"[SPONZA] Deferred Renderer | Shadows: %s | Debug:%u | Particles: %u %s %s",
+            m_enableShadows ? L"ON" : L"OFF",
+            m_debugMode,
             m_particles.GetAliveCountForDraw(),
             m_particles.IsEnabled() ? L"ON" : L"OFF",
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
@@ -1043,11 +1100,13 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     // 5=Lighting only
     // 6=Point lights only (all active point lights)
     // 7=Spot lights only
-    // 8=Rain point lights debug (alias of point-only for explicit QA)
-    if (key >= '0' && key <= '8')
+    // 8=CSM shadow mask
+    // 9=CSM cascade colors
+    if (key >= '0' && key <= '9')
+    {
         m_debugMode = static_cast<UINT>(key - '0');
-    if (key == '9')
-        m_debugMode = 1;
+        UpdateWindowTitle();
+    }
 
     // Geometry debug visualization (F1..F4):
     // F1 = regular render
@@ -1059,6 +1118,14 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == VK_F3) m_geometryDebugMode = 2;
     if (key == VK_F4) m_geometryDebugMode = 3;
     if (key == VK_F5) m_debugStrongDisplacement = (m_debugStrongDisplacement == 0) ? 1u : 0u;
+
+    // H toggles CSM sampling. Useful for checking that the base directional light
+    // is visible before/after applying PCF shadows.
+    if (key == 'H')
+    {
+        m_enableShadows = m_enableShadows ? 0u : 1u;
+        UpdateWindowTitle();
+    }
 
     if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
     {
@@ -1226,24 +1293,22 @@ void RenderingSystem::CreateRootSignatures()
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0);
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0); // LightingFrameConstants
         params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
-        CD3DX12_STATIC_SAMPLER_DESC sampler(
-            0,
-            D3D12_FILTER_MIN_MAG_MIP_POINT,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+        CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {
+            CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+        };
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
             2,
             params,
-            1,
-            &sampler,
+            2,
+            samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serialized, errors;
@@ -1253,25 +1318,23 @@ void RenderingSystem::CreateRootSignatures()
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsConstantBufferView(0); // LightingFrameConstants
         params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
         params[2].InitAsConstantBufferView(1); // LocalLightConstants
 
-        CD3DX12_STATIC_SAMPLER_DESC sampler(
-            0,
-            D3D12_FILTER_MIN_MAG_MIP_POINT,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-            D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+        CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {
+            CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+        };
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
             3,
             params,
-            1,
-            &sampler,
+            2,
+            samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serialized, errors;
@@ -1314,6 +1377,24 @@ void RenderingSystem::CreateRootSignatures()
         RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_debugLineRS)));
     }
+
+    {
+        CD3DX12_ROOT_PARAMETER params[2];
+        params[0].InitAsConstantBufferView(0); // ObjectTransformConstants
+        params[1].InitAsConstantBufferView(1); // per-cascade ShadowViewProj
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(
+            2,
+            params,
+            0,
+            nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ComPtr<ID3DBlob> serialized, errors;
+        RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_shadowRS)));
+    }
+
 }
 
 void RenderingSystem::CreatePSOs()
@@ -1397,8 +1478,9 @@ void RenderingSystem::CreatePSOs()
     compileShader(L"LightingPass.hlsl", "VSFullscreen", "vs_5_0", m_lightFullscreenVS);
     compileShader(L"RainLightProxy.hlsl", "VSProxy", "vs_5_0", m_rainProxyVS);
     compileShader(L"DebugLine.hlsl", "VSMain", "vs_5_0", m_debugLineVS);
+    compileShader(L"ShadowMap.hlsl", "VSMain", "vs_5_0", m_shadowVS);
 
-    if (!m_geoVS || !m_geoHS || !m_geoDS || !m_geoPS || !m_geoNoTessVS || !m_geoNoTessPS || !m_lightFullscreenVS || !m_rainProxyVS || !m_debugLineVS)
+    if (!m_geoVS || !m_geoHS || !m_geoDS || !m_geoPS || !m_geoNoTessVS || !m_geoNoTessPS || !m_lightFullscreenVS || !m_rainProxyVS || !m_debugLineVS || !m_shadowVS)
     {
         throw std::runtime_error("CreatePSOs: one or more mandatory shader blobs are null after compilation.");
     }
@@ -1440,6 +1522,32 @@ void RenderingSystem::CreatePSOs()
     geoNoTessDesc.PS = { m_geoNoTessPS->GetBufferPointer(), m_geoNoTessPS->GetBufferSize() };
     geoNoTessDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&geoNoTessDesc, IID_PPV_ARGS(&m_geometryNoTessPSO)));
+
+    {
+        ComPtr<ID3DBlob> shadowPS;
+        compileShader(L"ShadowMap.hlsl", "PSMain", "ps_5_0", shadowPS);
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowDesc{};
+        shadowDesc.InputLayout = { geoLayout, _countof(geoLayout) };
+        shadowDesc.pRootSignature = m_shadowRS.Get();
+        shadowDesc.VS = { m_shadowVS->GetBufferPointer(), m_shadowVS->GetBufferSize() };
+        shadowDesc.PS = { shadowPS->GetBufferPointer(), shadowPS->GetBufferSize() };
+        shadowDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        shadowDesc.RasterizerState.DepthBias = m_shadowDepthBias;
+        shadowDesc.RasterizerState.SlopeScaledDepthBias = m_shadowSlopeBias;
+        shadowDesc.RasterizerState.DepthBiasClamp = 0.01f;
+        shadowDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        shadowDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        shadowDesc.DepthStencilState.DepthEnable = TRUE;
+        shadowDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        shadowDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        shadowDesc.SampleMask = UINT_MAX;
+        shadowDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        shadowDesc.NumRenderTargets = 0;
+        shadowDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        shadowDesc.SampleDesc.Count = 1;
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&shadowDesc, IID_PPV_ARGS(&m_shadowPSO)));
+    }
 
     auto makeFullscreenLightingPso = [&](const char* psEntry, bool additive, ID3D12RootSignature* rootSignature, ComPtr<ID3D12PipelineState>& outPSO)
     {
@@ -2033,6 +2141,231 @@ void RenderingSystem::GeometryPass()
     m_materialCB->Unmap(0, nullptr);
 }
 
+void RenderingSystem::UpdateCascadedShadowMapsData()
+{
+    const float nearZ = (std::max)(m_cameraNear, 0.01f);
+    const float farZ = (std::max)(m_cameraFar, nearZ + 1.0f);
+    const float lambda = 0.5f;
+
+    std::array<float, ShadowCascadeCount> splits{};
+    for (UINT i = 1; i <= ShadowCascadeCount; ++i)
+    {
+        const float p = static_cast<float>(i) / static_cast<float>(ShadowCascadeCount);
+        const float logSplit = nearZ * std::pow(farZ / nearZ, p);
+        const float linearSplit = nearZ + (farZ - nearZ) * p;
+        splits[i - 1] = lambda * logSplit + (1.0f - lambda) * linearSplit;
+    }
+    splits[ShadowCascadeCount - 1] = farZ;
+
+    // Cascade splits are stored as view-space distances. LightingPass.hlsl compares them
+    // with abs(viewPos.z) to choose the Texture2DArray slice.
+    m_cascadeSplits = XMFLOAT4(splits[0], splits[1], splits[2], splits[3]);
+
+    const XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    const XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    const XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+
+    XMVECTOR fullNearCorners[4]{};
+    XMVECTOR fullFarCorners[4]{};
+    const float ndcX[4] = { -1.0f, 1.0f, 1.0f, -1.0f };
+    const float ndcY[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
+    for (UINT i = 0; i < 4; ++i)
+    {
+        fullNearCorners[i] = XMVector3TransformCoord(XMVectorSet(ndcX[i], ndcY[i], 0.0f, 1.0f), invViewProj);
+        fullFarCorners[i] = XMVector3TransformCoord(XMVectorSet(ndcX[i], ndcY[i], 1.0f, 1.0f), invViewProj);
+    }
+
+    XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&m_directionalLightDirection));
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    if (std::abs(XMVectorGetX(XMVector3Dot(lightDir, up))) > 0.95f)
+    {
+        up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+
+    float previousSplit = nearZ;
+    for (UINT cascade = 0; cascade < ShadowCascadeCount; ++cascade)
+    {
+        const float cascadeNear = previousSplit;
+        const float cascadeFar = splits[cascade];
+        previousSplit = cascadeFar;
+
+        const float nearRatio = (cascadeNear - nearZ) / (farZ - nearZ);
+        const float farRatio = (cascadeFar - nearZ) / (farZ - nearZ);
+
+        XMVECTOR cascadeCorners[8]{};
+        XMVECTOR center = XMVectorZero();
+        for (UINT i = 0; i < 4; ++i)
+        {
+            const XMVECTOR cornerRay = fullFarCorners[i] - fullNearCorners[i];
+            cascadeCorners[i] = fullNearCorners[i] + cornerRay * nearRatio;
+            cascadeCorners[i + 4] = fullNearCorners[i] + cornerRay * farRatio;
+            center += cascadeCorners[i] + cascadeCorners[i + 4];
+        }
+        center = XMVectorScale(center, 1.0f / 8.0f);
+
+        float radius = 0.0f;
+        for (const XMVECTOR& corner : cascadeCorners)
+        {
+            radius = (std::max)(radius, XMVectorGetX(XMVector3Length(corner - center)));
+        }
+        const float lightDistance = radius + 250.0f;
+        const XMVECTOR eye = center - lightDir * lightDistance;
+        const XMMATRIX lightView = XMMatrixLookAtLH(eye, center, up);
+
+        XMFLOAT3 minBounds(
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)(),
+            (std::numeric_limits<float>::max)());
+        XMFLOAT3 maxBounds(
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)(),
+            -(std::numeric_limits<float>::max)());
+
+        for (const XMVECTOR& corner : cascadeCorners)
+        {
+            XMFLOAT3 p{};
+            XMStoreFloat3(&p, XMVector3TransformCoord(corner, lightView));
+            minBounds.x = (std::min)(minBounds.x, p.x);
+            minBounds.y = (std::min)(minBounds.y, p.y);
+            minBounds.z = (std::min)(minBounds.z, p.z);
+            maxBounds.x = (std::max)(maxBounds.x, p.x);
+            maxBounds.y = (std::max)(maxBounds.y, p.y);
+            maxBounds.z = (std::max)(maxBounds.z, p.z);
+        }
+
+        // Basic stabilization: snap the orthographic XY center to shadow texel units.
+        const float width = maxBounds.x - minBounds.x;
+        const float height = maxBounds.y - minBounds.y;
+        const float texelX = width / static_cast<float>(ShadowMapResolution);
+        const float texelY = height / static_cast<float>(ShadowMapResolution);
+        float centerX = (minBounds.x + maxBounds.x) * 0.5f;
+        float centerY = (minBounds.y + maxBounds.y) * 0.5f;
+        centerX = std::floor(centerX / texelX) * texelX;
+        centerY = std::floor(centerY / texelY) * texelY;
+        minBounds.x = centerX - width * 0.5f;
+        maxBounds.x = centerX + width * 0.5f;
+        minBounds.y = centerY - height * 0.5f;
+        maxBounds.y = centerY + height * 0.5f;
+
+        minBounds.z -= 250.0f;
+        maxBounds.z += 250.0f;
+
+        const XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+            minBounds.x,
+            maxBounds.x,
+            minBounds.y,
+            maxBounds.y,
+            minBounds.z,
+            maxBounds.z);
+
+        // Matrices in this project are uploaded transposed and consumed with row-vector mul().
+        XMStoreFloat4x4(&m_shadowViewProj[cascade], XMMatrixTranspose(lightView * lightProj));
+    }
+}
+
+void RenderingSystem::ShadowPass()
+{
+    if (!m_enableShadows || !m_shadowMap || !m_shadowPSO || !m_shadowRS || !m_shadowFrameCB || !m_shadowObjectTransformCB)
+        return;
+
+    auto cmdList = m_renderer.GetCmdList();
+
+    auto toDepthWrite = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_shadowMap.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    cmdList->ResourceBarrier(1, &toDepthWrite);
+
+    D3D12_VIEWPORT shadowViewport{};
+    shadowViewport.TopLeftX = 0.0f;
+    shadowViewport.TopLeftY = 0.0f;
+    shadowViewport.Width = static_cast<float>(ShadowMapResolution);
+    shadowViewport.Height = static_cast<float>(ShadowMapResolution);
+    shadowViewport.MinDepth = 0.0f;
+    shadowViewport.MaxDepth = 1.0f;
+    D3D12_RECT shadowScissor{ 0, 0, static_cast<LONG>(ShadowMapResolution), static_cast<LONG>(ShadowMapResolution) };
+    cmdList->RSSetViewports(1, &shadowViewport);
+    cmdList->RSSetScissorRects(1, &shadowScissor);
+
+    cmdList->SetGraphicsRootSignature(m_shadowRS.Get());
+    cmdList->SetPipelineState(m_shadowPSO.Get());
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
+    cmdList->IASetIndexBuffer(m_renderer.GetIbView());
+
+    const auto& subsets = m_renderer.GetSubsets();
+    if (!subsets.empty())
+    {
+        void* shadowObjectMapped = nullptr;
+        m_shadowObjectTransformCB->Map(0, nullptr, &shadowObjectMapped);
+        auto* shadowObjectBase = reinterpret_cast<std::uint8_t*>(shadowObjectMapped);
+
+        const bool drawMainModel = m_renderMainSceneModel || m_sceneObjects.empty();
+        const size_t objectCount = drawMainModel ? 1 : m_sceneObjects.size();
+
+        for (UINT cascade = 0; cascade < ShadowCascadeCount; ++cascade)
+        {
+            void* shadowFrameMapped = nullptr;
+            m_shadowFrameCB->Map(0, nullptr, &shadowFrameMapped);
+            memcpy(
+                reinterpret_cast<std::uint8_t*>(shadowFrameMapped) + cascade * m_shadowFrameCbStride,
+                &m_shadowViewProj[cascade],
+                sizeof(XMFLOAT4X4));
+            m_shadowFrameCB->Unmap(0, nullptr);
+
+            cmdList->ClearDepthStencilView(m_shadowDsvHandles[cascade], D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cmdList->OMSetRenderTargets(0, nullptr, FALSE, &m_shadowDsvHandles[cascade]);
+            cmdList->SetGraphicsRootConstantBufferView(1, m_shadowFrameCB->GetGPUVirtualAddress() + cascade * m_shadowFrameCbStride);
+
+            size_t drawIndex = 0;
+            for (size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
+            {
+                const SceneObject* object = drawMainModel ? nullptr : &m_sceneObjects[objectIndex];
+                for (size_t subsetIndex = 0; subsetIndex < subsets.size(); ++subsetIndex)
+                {
+                    if (drawIndex >= m_maxObjectCbCount)
+                        break;
+
+                    ObjectTransformConstants transform{};
+                    if (drawMainModel)
+                    {
+                        const XMMATRIX identity = XMMatrixIdentity();
+                        XMStoreFloat4x4(&transform.World, XMMatrixTranspose(identity));
+                        XMStoreFloat4x4(&transform.WorldInvTranspose, XMMatrixTranspose(identity));
+                        transform.ColorTint = XMFLOAT4(1, 1, 1, 1);
+                    }
+                    else
+                    {
+                        transform.World = object->World;
+                        transform.WorldInvTranspose = object->WorldInvTranspose;
+                        transform.ColorTint = object->ColorTint;
+                    }
+
+                    const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
+                    memcpy(shadowObjectBase + transformOffset, &transform, sizeof(transform));
+                    cmdList->SetGraphicsRootConstantBufferView(0, m_shadowObjectTransformCB->GetGPUVirtualAddress() + transformOffset);
+                    const auto& subset = subsets[subsetIndex];
+                    cmdList->DrawIndexedInstanced(subset.indexCount, 1, subset.indexStart, 0, 0);
+                    ++drawIndex;
+                }
+            }
+        }
+
+        m_shadowObjectTransformCB->Unmap(0, nullptr);
+    }
+
+    auto toShaderResource = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_shadowMap.Get(),
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &toShaderResource);
+
+    D3D12_VIEWPORT backBufferViewport{ 0.0f, 0.0f, static_cast<float>(m_renderer.GetWidth()), static_cast<float>(m_renderer.GetHeight()), 0.0f, 1.0f };
+    D3D12_RECT backBufferScissor{ 0, 0, static_cast<LONG>(m_renderer.GetWidth()), static_cast<LONG>(m_renderer.GetHeight()) };
+    cmdList->RSSetViewports(1, &backBufferViewport);
+    cmdList->RSSetScissorRects(1, &backBufferScissor);
+}
+
 void RenderingSystem::UpdateFrameConstants()
 {
     LightingContract::LightingFrameConstants cb{};
@@ -2049,7 +2382,16 @@ void RenderingSystem::UpdateFrameConstants()
     XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
     XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    cb.View = m_view;
     XMStoreFloat4x4(&cb.InvViewProj, XMMatrixTranspose(invViewProj));
+    for (UINT cascade = 0; cascade < ShadowCascadeCount; ++cascade)
+    {
+        cb.ShadowViewProj[cascade] = m_shadowViewProj[cascade];
+    }
+    cb.CascadeSplits = m_cascadeSplits;
+    cb.ShadowMapSize = static_cast<float>(ShadowMapResolution);
+    cb.CascadeCount = ShadowCascadeCount;
+    cb.EnableShadows = m_enableShadows;
 
     cb.PointLightCount = (std::min)(m_activePointLights, LightingContract::MaxPointLights);
     cb.SpotLightCount = m_activeSpotLights;
@@ -2250,6 +2592,9 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
         UpdateObjectVisibility();
     }
 
+    UpdateCascadedShadowMapsData();
+    ShadowPass();
+
     m_gbuffer.BeginGeometryPass(cmdList);
     m_gbuffer.Clear(cmdList);
     GeometryPass();
@@ -2264,12 +2609,12 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     LightingPassDirectional();
 
     // Local lights are only needed in final and lighting debug modes.
-    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 7 || m_debugMode == 8)
+    if (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 7)
     {
         LightingPassLocal();
     }
 
-    if (m_enableFallingLights && (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6 || m_debugMode == 8))
+    if (m_enableFallingLights && (m_debugMode == 0 || m_debugMode == 5 || m_debugMode == 6))
     {
         RainLightProxyPass();
     }
@@ -2344,8 +2689,8 @@ void RenderingSystem::OnResize(int width, int height)
     const XMMATRIX proj = XMMatrixPerspectiveFovLH(
         XMConvertToRadians(60.0f),
         static_cast<float>(width) / static_cast<float>(height),
-        1.0f,
-        5000.0f);
+        m_cameraNear,
+        m_cameraFar);
     XMStoreFloat4x4(&m_proj, XMMatrixTranspose(proj));
 }
 

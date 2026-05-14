@@ -9,6 +9,12 @@
 #include <random>
 #include <vector>
 
+namespace RenderingShadowSettings
+{
+    constexpr UINT CascadeCount = 4;
+    constexpr UINT MapResolution = 2048;
+}
+
 class RenderingSystem
 {
 public:
@@ -102,6 +108,7 @@ private:
 
     void GeometryPass();
     void LightingPassDirectional();
+    void ShadowPass();
     void LightingPassLocal();
     void RainLightProxyPass();
 
@@ -114,6 +121,7 @@ private:
     void TrimGroundedLightsIfNeeded();
 
     void UpdateFrameConstants();
+    void UpdateCascadedShadowMapsData();
     void UpdateLocalLightConstants();
     void UploadPointLightsToGpu();
     void UpdateCamera(float dt);
@@ -140,6 +148,9 @@ private:
 
 private:
     static constexpr UINT PointLightsSrvIndex = 5;
+    static constexpr UINT ShadowMapSrvIndex = 6;
+    static constexpr UINT ShadowCascadeCount = RenderingShadowSettings::CascadeCount;
+    static constexpr UINT ShadowMapResolution = RenderingShadowSettings::MapResolution;
 
     Renderer m_renderer;
     GBuffer m_gbuffer;
@@ -152,10 +163,12 @@ private:
     ComPtr<ID3D12RootSignature> m_lightingLocalRS;
     ComPtr<ID3D12RootSignature> m_rainProxyRS;
     ComPtr<ID3D12RootSignature> m_debugLineRS;
+    ComPtr<ID3D12RootSignature> m_shadowRS;
 
     ComPtr<ID3D12PipelineState> m_geometryPSO;
     ComPtr<ID3D12PipelineState> m_geometryNoTessPSO;
     ComPtr<ID3D12PipelineState> m_psoDirectional;
+    ComPtr<ID3D12PipelineState> m_shadowPSO;
     ComPtr<ID3D12PipelineState> m_psoLocal;
     ComPtr<ID3D12PipelineState> m_psoRainProxy;
     ComPtr<ID3D12PipelineState> m_debugLinePSO;
@@ -169,6 +182,7 @@ private:
     ComPtr<ID3DBlob> m_lightFullscreenVS;
     ComPtr<ID3DBlob> m_rainProxyVS;
     ComPtr<ID3DBlob> m_debugLineVS;
+    ComPtr<ID3DBlob> m_shadowVS;
 
     ComPtr<ID3D12Resource> m_objectTransformCB;
     ComPtr<ID3D12Resource> m_geometryFrameCB;
@@ -180,8 +194,13 @@ private:
     ComPtr<ID3D12Resource> m_pointLightsDefaultBuffer;
     ComPtr<ID3D12Resource> m_debugLineVertexBuffer;
     ComPtr<ID3D12Resource> m_debugLineCB;
+    ComPtr<ID3D12Resource> m_shadowMap;
+    ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
+    ComPtr<ID3D12Resource> m_shadowFrameCB;
+    ComPtr<ID3D12Resource> m_shadowObjectTransformCB;
     UINT m_objectTransformCbStride = 0;
     UINT m_materialCbStride = 0;
+    UINT m_shadowFrameCbStride = 0;
     UINT m_maxObjectCbCount = 0;
 
     HWND m_hwnd = nullptr;
@@ -329,4 +348,12 @@ private:
     XMFLOAT3 m_directionalLightDirection = XMFLOAT3(0.30f, -1.0f, 0.25f);
     XMFLOAT3 m_directionalLightColor = XMFLOAT3(1.0f, 1.0f, 1.0f);
     float m_directionalLightIntensity = 2.20f;
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, RenderingShadowSettings::CascadeCount> m_shadowDsvHandles{};
+    XMFLOAT4 m_cascadeSplits = { 0,0,0,0 };
+    std::array<XMFLOAT4X4, RenderingShadowSettings::CascadeCount> m_shadowViewProj{};
+    float m_cameraNear = 0.1f;
+    float m_cameraFar = 1200.0f;
+    UINT m_enableShadows = 1;
+    INT m_shadowDepthBias = 2000;
+    float m_shadowSlopeBias = 2.0f;
 };
