@@ -95,6 +95,7 @@ public:
     bool LoadObj(const std::string& path);
     bool LoadPrimitiveCubeScene();
     bool LoadPrimitivePlaneScene();
+    bool LoadAlphaTestShadowScene();
     bool LoadMassPrimitiveScene();
     int LoadTextureToSrv(const std::wstring& texturePath);
     void WaitForIdle() { WaitForGPU(); }

@@ -33,7 +33,8 @@ public:
     {
         DirtyInstancing,
         Sponza,
-        PerlinPlane
+        PerlinPlane,
+        AlphaTestShadow
     };
 
     bool Init(HWND hwnd, int width, int height);
@@ -45,6 +46,7 @@ public:
     bool SwitchToSponzaScene();
     bool SwitchToDirtyScene();
     bool SwitchToPerlinPlaneScene();
+    bool SwitchToAlphaTestShadowScene();
     DemoSceneKind GetActiveSceneKind() const { return m_activeSceneKind; }
     void RequestSceneSwitch(DemoSceneKind scene);
     bool ApplyPendingSceneSwitchIfNeeded();
@@ -105,6 +107,7 @@ private:
     void ApplySponzaSceneSettings();
     void ApplyDirtySceneSettings();
     void ApplyPerlinPlaneSceneSettings();
+    void ApplyAlphaTestShadowSceneSettings();
 
     void GeometryPass();
     void LightingPassDirectional();
@@ -143,6 +146,7 @@ private:
     void AddDebugBox(const XMFLOAT3& min, const XMFLOAT3& max, const XMFLOAT4& color);
     void UploadDebugLines();
     void DebugLinePass();
+    bool ShouldRunParticleFountain() const;
     XMFLOAT3 GetParticleEmitterPosition() const;
     ParticleSystemGPU::FountainSettings GetParticleFountainSettings() const;
 

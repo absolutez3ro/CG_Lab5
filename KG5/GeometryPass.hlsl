@@ -243,6 +243,11 @@ PSOutput PSMain(DSOutput pin)
 {
     PSOutput o;
     float4 albedo = gHasTexture ? gDiffuseMap.Sample(gSampler, pin.TexCoord) : gMaterialDiffuse;
+
+    const float textureAlpha = (gHasTexture != 0) ? albedo.a : 1.0f;
+    const float finalAlpha = textureAlpha * gMaterialDiffuse.a;
+    clip(finalAlpha - 0.5f);
+    albedo.a = finalAlpha;
     albedo.rgb *= pin.ColorTint.rgb;
 
     if (gUseProceduralDisplacement != 0)

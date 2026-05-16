@@ -297,6 +297,23 @@ void RenderingSystem::ApplyPerlinPlaneSceneSettings()
     m_directionalLightIntensity = 1.8f;
 }
 
+void RenderingSystem::ApplyAlphaTestShadowSceneSettings()
+{
+    m_cameraPos = XMFLOAT3(0.0f, 90.0f, -210.0f);
+    m_yaw = 0.0f;
+    m_pitch = -0.33f;
+    m_moveSpeed = 180.0f;
+    m_tessMinFactor = 1.0f;
+    m_tessMaxFactor = 1.0f;
+    m_tessMinDistance = 5.0f;
+    m_tessMaxDistance = 80.0f;
+    m_ambientColor = XMFLOAT4(0.20f, 0.21f, 0.23f, 1.0f);
+    m_directionalLightDirection = XMFLOAT3(0.55f, -1.0f, 0.35f);
+    m_directionalLightColor = XMFLOAT3(1.0f, 0.98f, 0.92f);
+    m_directionalLightIntensity = 2.35f;
+    m_enableShadows = 1;
+}
+
 bool RenderingSystem::SwitchToSponzaScene()
 {
     if (m_activeSceneKind == DemoSceneKind::Sponza)
@@ -378,14 +395,9 @@ bool RenderingSystem::SwitchToDirtyScene()
     }
     SetupSceneLights();
     RebuildCullingDebugLines();
-
-    // Prepare billboard resources before the frame command list is opened.
-    // EnsureBillboardResources() may load a texture and reset/close the renderer command list,
-    // so it must not be called from GeometryPass().
     EnsureBillboardResources();
 
-    // Restart particles so old Sponza fountain particles do not remain in the Dirty scene.
-    m_particlesReinitRequested = true;
+    m_particlesReinitRequested = false;
     UpdateViewMatrix();
     UpdateWindowTitle();
     m_renderer.WaitForIdle();
@@ -416,7 +428,36 @@ bool RenderingSystem::SwitchToPerlinPlaneScene()
     BuildSingleMainSceneObject();
     ApplyPerlinPlaneSceneSettings();
     SetupSceneLights();
-    m_particlesReinitRequested = true;
+    m_particlesReinitRequested = false;
+    UpdateViewMatrix();
+    UpdateWindowTitle();
+    m_renderer.WaitForIdle();
+    return true;
+}
+
+bool RenderingSystem::SwitchToAlphaTestShadowScene()
+{
+    if (m_activeSceneKind == DemoSceneKind::AlphaTestShadow)
+        return true;
+
+    m_renderer.WaitForIdle();
+    m_activeSceneKind = DemoSceneKind::AlphaTestShadow;
+    m_renderMainSceneModel = false;
+    m_useTessellationForScene = false;
+    m_enableFallingLights = false;
+    m_enableGroundPlane = false;
+    m_showCullingDebugGrid = false;
+    m_debugLineVertices.clear();
+    m_debugStrongDisplacement = 0;
+    m_geometryDebugMode = 0;
+
+    if (!m_renderer.LoadAlphaTestShadowScene())
+        return false;
+
+    BuildSingleMainSceneObject();
+    ApplyAlphaTestShadowSceneSettings();
+    SetupSceneLights();
+    m_particlesReinitRequested = false;
     UpdateViewMatrix();
     UpdateWindowTitle();
     m_renderer.WaitForIdle();
@@ -451,83 +492,66 @@ void RenderingSystem::UpdateWindowTitle() const
 
         swprintf_s(
             title,
-            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | Particles: %u %s %s",
+            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u",
             modeLabel,
             m_visibleObjectCount,
             m_sceneObjectCount,
             m_cubeDrawCount,
-            m_billboardDrawCount,
-            m_particles.GetAliveCountForDraw(),
-            m_particles.IsEnabled() ? L"ON" : L"OFF",
-            m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+            m_billboardDrawCount);
 
+        SetWindowTextW(m_hwnd, title);
+    }
+    else if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
+    {
+        wchar_t title[256];
+        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f",
+            m_perlinNoiseSeed);
         SetWindowTextW(m_hwnd, title);
     }
     else
     {
         wchar_t title[256];
-        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | Particles: %u %s %s",
-            m_perlinNoiseSeed,
-            m_particles.GetAliveCountForDraw(),
-            m_particles.IsEnabled() ? L"ON" : L"OFF",
-            m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
+        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows: %s | Debug:%u",
+            m_enableShadows ? L"ON" : L"OFF",
+            m_debugMode);
         SetWindowTextW(m_hwnd, title);
     }
 }
 
+bool RenderingSystem::ShouldRunParticleFountain() const
+{
+    return m_activeSceneKind == DemoSceneKind::Sponza;
+}
+
 XMFLOAT3 RenderingSystem::GetParticleEmitterPosition() const
 {
-    if (m_activeSceneKind == DemoSceneKind::Sponza)
-    {
-        // Demo fountain inside Sponza, in front of the default camera.
-        // This position is low enough to read as a fountain instead of floating particles.
-        return XMFLOAT3(0.0f, 24.0f, -85.0f);
-    }
-    if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
-    {
-        // Keep particles away from center so plane relief stays visible.
-        return XMFLOAT3(-220.0f, 24.0f, -140.0f);
-    }
 
-    return XMFLOAT3(0.0f, 40.0f, 0.0f);
+    return XMFLOAT3(0.0f, 24.0f, -85.0f);
 }
 
 ParticleSystemGPU::FountainSettings RenderingSystem::GetParticleFountainSettings() const
 {
     ParticleSystemGPU::FountainSettings settings{};
 
-    if (m_activeSceneKind == DemoSceneKind::Sponza)
+    if (!ShouldRunParticleFountain())
     {
-        // Smoke fountain setup for Lab6 demonstration in Sponza.
-        settings.EmitPerFrame = 14;
-        settings.BaseVelocity = XMFLOAT3(0.0f, 8.5f, 0.0f);
-        settings.VelocityRandomness = XMFLOAT3(16.0f, 6.0f, 16.0f);
-        settings.Gravity = XMFLOAT3(0.0f, 0.45f, 0.0f);
-        settings.MinLifeSpan = 4.0f;
-        settings.MaxLifeSpan = 7.0f;
-        settings.MinSize = 14.0f;
-        settings.MaxSize = 34.0f;
-        settings.EmitterRadius = 18.0f;
-        settings.GroundY = 0.0f;
-        settings.EnableGroundCollision = 1;
-        settings.StartColorA = XMFLOAT4(0.58f, 0.58f, 0.58f, 0.085f);
-        settings.StartColorB = XMFLOAT4(0.25f, 0.25f, 0.25f, 0.025f);
+        settings.EmitPerFrame = 0;
         return settings;
     }
 
-    // Smaller fountain for the Dirty cubes scene.
-    settings.EmitPerFrame = 32;
-    settings.BaseVelocity = XMFLOAT3(0.0f, 30.0f, 0.0f);
-    settings.VelocityRandomness = XMFLOAT3(12.0f, 8.0f, 12.0f);
-    settings.Gravity = XMFLOAT3(0.0f, -9.8f, 0.0f);
-    settings.MinLifeSpan = 2.0f;
-    settings.MaxLifeSpan = 3.2f;
-    settings.MinSize = 1.6f;
-    settings.MaxSize = 4.0f;
-    settings.GroundY = -10.0f;
+    settings.EmitPerFrame = 14;
+    settings.BaseVelocity = XMFLOAT3(0.0f, 8.5f, 0.0f);
+    settings.VelocityRandomness = XMFLOAT3(16.0f, 6.0f, 16.0f);
+    settings.Gravity = XMFLOAT3(0.0f, 0.45f, 0.0f);
+    settings.MinLifeSpan = 4.0f;
+    settings.MaxLifeSpan = 7.0f;
+    settings.MinSize = 14.0f;
+    settings.MaxSize = 34.0f;
+    settings.EmitterRadius = 18.0f;
+    settings.GroundY = 0.0f;
     settings.EnableGroundCollision = 1;
-    settings.StartColorA = XMFLOAT4(1.0f, 0.65f, 0.15f, 1.0f);
-    settings.StartColorB = XMFLOAT4(0.35f, 0.55f, 1.0f, 1.0f);
+    settings.StartColorA = XMFLOAT4(0.58f, 0.58f, 0.58f, 0.085f);
+    settings.StartColorB = XMFLOAT4(0.25f, 0.25f, 0.25f, 0.025f);
     return settings;
 }
 
@@ -543,6 +567,8 @@ void RenderingSystem::RequestSceneSwitch(DemoSceneKind scene)
         OutputDebugStringA("[SceneSwitch] Request Sponza\n");
     else if (scene == DemoSceneKind::PerlinPlane)
         OutputDebugStringA("[SceneSwitch] Request PerlinPlane\n");
+    else if (scene == DemoSceneKind::AlphaTestShadow)
+        OutputDebugStringA("[SceneSwitch] Request AlphaTestShadow\n");
     else
         OutputDebugStringA("[SceneSwitch] Request Dirty\n");
 
@@ -564,6 +590,8 @@ bool RenderingSystem::ApplyPendingSceneSwitchIfNeeded()
         return SwitchToSponzaScene();
     if (requested == DemoSceneKind::PerlinPlane)
         return SwitchToPerlinPlaneScene();
+    if (requested == DemoSceneKind::AlphaTestShadow)
+        return SwitchToAlphaTestShadowScene();
 
     return SwitchToDirtyScene();
 }
@@ -1015,6 +1043,11 @@ void RenderingSystem::OnKeyDown(WPARAM key)
         RequestSceneSwitch(DemoSceneKind::PerlinPlane);
         return;
     }
+    if (key == 'V')
+    {
+        RequestSceneSwitch(DemoSceneKind::AlphaTestShadow);
+        return;
+    }
 
     if (key == 'W') m_moveForward = true;
     if (key == 'S') m_moveBackward = true;
@@ -1022,19 +1055,19 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'D') m_moveRight = true;
     if (key == 'Q') m_moveUp = true;
     if (key == 'E') m_moveDown = true;
-    if (key == 'P')
+    if (key == 'P' && ShouldRunParticleFountain())
     {
         m_particles.SetEnabled(!m_particles.IsEnabled());
         UpdateWindowTitle();
         return;
     }
-    if (key == 'O')
+    if (key == 'O' && ShouldRunParticleFountain())
     {
         m_particles.SetSortEnabled(!m_particles.IsSortEnabled());
         UpdateWindowTitle();
         return;
     }
-    if (key == 'I')
+    if (key == 'I' && ShouldRunParticleFountain())
     {
         m_particlesReinitRequested = true;
         UpdateWindowTitle();
@@ -1241,7 +1274,6 @@ void RenderingSystem::UpdateViewMatrix()
 
 void RenderingSystem::BeginFrame(const float clearColor[4])
 {
-    // Must happen before command allocator/list reset in Renderer::BeginFrame().
     ApplyPendingSceneSwitchIfNeeded();
 
     m_renderer.BeginFrame();
@@ -1379,15 +1411,27 @@ void RenderingSystem::CreateRootSignatures()
     }
 
     {
-        CD3DX12_ROOT_PARAMETER params[2];
+        CD3DX12_DESCRIPTOR_RANGE diffuseSrvRange;
+        diffuseSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+        CD3DX12_ROOT_PARAMETER params[4];
         params[0].InitAsConstantBufferView(0); // ObjectTransformConstants
         params[1].InitAsConstantBufferView(1); // per-cascade ShadowViewProj
+        params[2].InitAsConstantBufferView(2); // MaterialConstants for alpha-tested shadows
+        params[3].InitAsDescriptorTable(1, &diffuseSrvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        CD3DX12_STATIC_SAMPLER_DESC sampler(
+            0,
+            D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
-            2,
+            4,
             params,
-            0,
-            nullptr,
+            1,
+            &sampler,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ComPtr<ID3DBlob> serialized, errors;
@@ -1751,8 +1795,6 @@ RenderingSystem::RainPointLight RenderingSystem::GenerateRainLightParameters()
 {
     RainPointLight light{};
 
-    // Recommended cold palette for rain lights:
-    // cyan/blue/violet only, with no warm yellow tones.
     static constexpr XMFLOAT3 palette[] =
     {
         XMFLOAT3(0.25f, 0.60f, 1.00f), // cold blue
@@ -1773,12 +1815,9 @@ RenderingSystem::RainPointLight RenderingSystem::GenerateRainLightParameters()
         RS_Lerp(palette[idxA].y, palette[idxB].y, t),
         RS_Lerp(palette[idxA].z, palette[idxB].z, t));
 
-    // Keep actual lighting contribution moderate to avoid full-scene overexposure.
-    // Visual readability is handled mostly by the proxy pass.
     light.Range = RS_Lerp(m_rainLightRangeMin, m_rainLightRangeMax, m_rainUnitDist(m_rainRng));
     light.Intensity = RS_Lerp(m_rainLightIntensityMin, m_rainLightIntensityMax, m_rainUnitDist(m_rainRng));
 
-    // Jitter keeps motion organic while preserving overall rain density.
     const float speedJitter = RS_Lerp(-16.0f, 16.0f, m_rainUnitDist(m_rainRng));
     light.Velocity = XMFLOAT3(0.0f, -(m_rainFallSpeed + speedJitter), 0.0f);
 
@@ -1808,7 +1847,6 @@ void RenderingSystem::TrimGroundedLightsIfNeeded()
 
     m_rainDebugStats.GroundedTrimmedThisFrame = 0;
 
-    // Keep at least the guaranteed floor pool, but trim oldest once we exceed upper bound.
     while (m_groundedRainLights.size() > maxKeep && m_groundedRainLights.size() > minKeep)
     {
         m_groundedRainLights.pop_front();
@@ -1880,10 +1918,6 @@ void RenderingSystem::BuildActivePointLightsForGpu()
         m_activePointLightsForGpu.push_back(gpuLight);
     };
 
-    // Sponza uses the complete reference-style light set:
-    // directional light (UpdateFrameConstants), static point lights here,
-    // colored spot lights (SetupSponzaLights), plus the animated rain-light stream below.
-    // Static point lights are inserted before rain so they are never pushed out by the rain pool.
     UINT staticPointLightCount = 0;
     if (m_activeSceneKind == DemoSceneKind::Sponza)
     {
@@ -1902,7 +1936,7 @@ void RenderingSystem::BuildActivePointLightsForGpu()
         }
     }
 
-    // Keep descending lights visibly active even with a large grounded pool.
+
     size_t fallingRendered = 0;
     for (const RainPointLight& falling : m_fallingRainLights)
     {
@@ -2009,10 +2043,6 @@ void RenderingSystem::GeometryPass()
     const XMVECTOR up = XMVectorSet(0, 1, 0, 0);
     const XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, viewForward));
     const XMVECTOR billboardUp = XMVector3Normalize(XMVector3Cross(viewForward, right));
-
-    // Do not create/load billboard GPU resources from inside GeometryPass.
-    // GeometryPass runs while the frame command list is already open; resetting it here crashes with COMMAND_LIST_OPEN.
-    // Resources are prepared during SwitchToDirtyScene(), before Renderer::BeginFrame().
     const bool billboardsAllowed = (m_activeSceneKind == DemoSceneKind::DirtyInstancing) && m_billboardReady;
     m_cubeDrawCount = 0;
     m_billboardDrawCount = 0;
@@ -2265,7 +2295,7 @@ void RenderingSystem::UpdateCascadedShadowMapsData()
 
 void RenderingSystem::ShadowPass()
 {
-    if (!m_enableShadows || !m_shadowMap || !m_shadowPSO || !m_shadowRS || !m_shadowFrameCB || !m_shadowObjectTransformCB)
+    if (!m_enableShadows || !m_shadowMap || !m_shadowPSO || !m_shadowRS || !m_shadowFrameCB || !m_shadowObjectTransformCB || !m_materialCB)
         return;
 
     auto cmdList = m_renderer.GetCmdList();
@@ -2293,12 +2323,19 @@ void RenderingSystem::ShadowPass()
     cmdList->IASetVertexBuffers(0, 1, m_renderer.GetVbView());
     cmdList->IASetIndexBuffer(m_renderer.GetIbView());
 
+    ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
     const auto& subsets = m_renderer.GetSubsets();
+    const auto& materials = m_renderer.GetMaterials();
     if (!subsets.empty())
     {
         void* shadowObjectMapped = nullptr;
+        void* shadowMaterialMapped = nullptr;
         m_shadowObjectTransformCB->Map(0, nullptr, &shadowObjectMapped);
+        m_materialCB->Map(0, nullptr, &shadowMaterialMapped);
         auto* shadowObjectBase = reinterpret_cast<std::uint8_t*>(shadowObjectMapped);
+        auto* shadowMaterialBase = reinterpret_cast<std::uint8_t*>(shadowMaterialMapped);
 
         const bool drawMainModel = m_renderMainSceneModel || m_sceneObjects.empty();
         const size_t objectCount = drawMainModel ? 1 : m_sceneObjects.size();
@@ -2341,10 +2378,49 @@ void RenderingSystem::ShadowPass()
                         transform.ColorTint = object->ColorTint;
                     }
 
-                    const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
-                    memcpy(shadowObjectBase + transformOffset, &transform, sizeof(transform));
-                    cmdList->SetGraphicsRootConstantBufferView(0, m_shadowObjectTransformCB->GetGPUVirtualAddress() + transformOffset);
                     const auto& subset = subsets[subsetIndex];
+
+                    MaterialConstants material{};
+                    material.MaterialDiffuse = XMFLOAT4(1, 1, 1, 1);
+                    material.MaterialSpecular = XMFLOAT4(1, 1, 1, 1);
+                    material.SpecularPower = 32.0f;
+                    material.HasTexture = 0;
+                    material.HasNormalMap = 0;
+                    material.HasDisplacementMap = 0;
+                    material.DisplacementScale = 0.0f;
+                    material.DisplacementBias = 0.0f;
+
+                    UINT textureSrv = 0;
+                    if (subset.materialIdx >= 0 && subset.materialIdx < static_cast<int>(materials.size()))
+                    {
+                        const auto& mat = materials[subset.materialIdx];
+                        material.MaterialDiffuse = mat.diffuse;
+                        material.MaterialSpecular = mat.specular;
+                        material.SpecularPower = mat.specPower;
+                        if (mat.diffuseSrvHeapIndex >= 0)
+                        {
+                            material.HasTexture = 1;
+                            textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
+                        }
+                        if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
+                        {
+                            material.HasNormalMap = 1;
+                        }
+                        if (mat.displacementSrvHeapIndex >= 0 && mat.hasDisplacementMap)
+                        {
+                            material.HasDisplacementMap = 1;
+                            material.DisplacementScale = mat.displacementScale;
+                            material.DisplacementBias = mat.displacementBias;
+                        }
+                    }
+
+                    const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
+                    const UINT materialOffset = static_cast<UINT>(drawIndex * m_materialCbStride);
+                    memcpy(shadowObjectBase + transformOffset, &transform, sizeof(transform));
+                    memcpy(shadowMaterialBase + materialOffset, &material, sizeof(material));
+                    cmdList->SetGraphicsRootConstantBufferView(0, m_shadowObjectTransformCB->GetGPUVirtualAddress() + transformOffset);
+                    cmdList->SetGraphicsRootConstantBufferView(2, m_materialCB->GetGPUVirtualAddress() + materialOffset);
+                    cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(textureSrv));
                     cmdList->DrawIndexedInstanced(subset.indexCount, 1, subset.indexStart, 0, 0);
                     ++drawIndex;
                 }
@@ -2352,6 +2428,7 @@ void RenderingSystem::ShadowPass()
         }
 
         m_shadowObjectTransformCB->Unmap(0, nullptr);
+        m_materialCB->Unmap(0, nullptr);
     }
 
     auto toShaderResource = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -2580,12 +2657,20 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     }
 
     auto cmdList = m_renderer.GetCmdList();
-    if (m_particlesReinitRequested)
+    const bool runParticleFountain = ShouldRunParticleFountain();
+    if (runParticleFountain)
     {
-        m_particles.Reinitialize(cmdList);
+        if (m_particlesReinitRequested)
+        {
+            m_particles.Reinitialize(cmdList);
+            m_particlesReinitRequested = false;
+        }
+        m_particles.Update(cmdList, deltaTime, totalTime, m_cameraPos, GetParticleEmitterPosition(), GetParticleFountainSettings());
+    }
+    else
+    {
         m_particlesReinitRequested = false;
     }
-    m_particles.Update(cmdList, deltaTime, totalTime, m_cameraPos, GetParticleEmitterPosition(), GetParticleFountainSettings());
 
     if (m_activeSceneKind == DemoSceneKind::DirtyInstancing)
     {
@@ -2619,17 +2704,20 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
         RainLightProxyPass();
     }
 
-    m_particles.Render(
-        cmdList,
-        m_renderer.GetBackBufferRtv(),
-        m_renderer.GetDsvHandle(),
-        m_view,
-        m_proj,
-        m_cameraPos,
-        m_directionalLightDirection,
-        m_directionalLightIntensity,
-        m_directionalLightColor,
-        m_ambientColor);
+    if (runParticleFountain)
+    {
+        m_particles.Render(
+            cmdList,
+            m_renderer.GetBackBufferRtv(),
+            m_renderer.GetDsvHandle(),
+            m_view,
+            m_proj,
+            m_cameraPos,
+            m_directionalLightDirection,
+            m_directionalLightIntensity,
+            m_directionalLightColor,
+            m_ambientColor);
+    }
 
     if (m_activeSceneKind == DemoSceneKind::DirtyInstancing && m_enableCulling && m_showCullingDebugGrid)
     {

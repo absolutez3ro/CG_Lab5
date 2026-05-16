@@ -949,6 +949,146 @@ bool Renderer::LoadPrimitivePlaneScene()
     return true;
 }
 
+
+bool Renderer::LoadAlphaTestShadowScene()
+{
+    const float floorHalf = 180.0f;
+    const float fenceHalfWidth = 42.0f;
+    const float fenceHeight = 78.0f;
+    const float fenceZ = -12.0f;
+
+    const Vertex vertices[] =
+    {
+        // Opaque floor that receives the generated fence cutout shadow.
+        { XMFLOAT3(-floorHalf, 0.0f, -floorHalf), XMFLOAT3(0,1,0), XMFLOAT2(0,1), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3( floorHalf, 0.0f, -floorHalf), XMFLOAT3(0,1,0), XMFLOAT2(1,1), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3( floorHalf, 0.0f,  floorHalf), XMFLOAT3(0,1,0), XMFLOAT2(1,0), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+        { XMFLOAT3(-floorHalf, 0.0f,  floorHalf), XMFLOAT3(0,1,0), XMFLOAT2(0,0), XMFLOAT3(1,0,0), XMFLOAT3(0,0,1) },
+
+        // Vertical X/Y quad using the generated alpha texture; transparent gaps
+        // should neither draw in the GBuffer nor write into the shadow map.
+        { XMFLOAT3(-fenceHalfWidth, 0.5f, fenceZ), XMFLOAT3(0,0,-1), XMFLOAT2(0,1), XMFLOAT3(1,0,0), XMFLOAT3(0,1,0) },
+        { XMFLOAT3(-fenceHalfWidth, fenceHeight, fenceZ), XMFLOAT3(0,0,-1), XMFLOAT2(0,0), XMFLOAT3(1,0,0), XMFLOAT3(0,1,0) },
+        { XMFLOAT3( fenceHalfWidth, fenceHeight, fenceZ), XMFLOAT3(0,0,-1), XMFLOAT2(1,0), XMFLOAT3(1,0,0), XMFLOAT3(0,1,0) },
+        { XMFLOAT3( fenceHalfWidth, 0.5f, fenceZ), XMFLOAT3(0,0,-1), XMFLOAT2(1,1), XMFLOAT3(1,0,0), XMFLOAT3(0,1,0) },
+    };
+
+    const UINT indices[] =
+    {
+        0, 2, 1, 0, 3, 2,
+        4, 5, 6, 4, 6, 7
+    };
+
+    m_nextSrvIndex = 8;
+    m_subsets.clear();
+    MeshSubset floorSubset{};
+    floorSubset.indexStart = 0;
+    floorSubset.indexCount = 6;
+    floorSubset.materialIdx = 0;
+    m_subsets.push_back(floorSubset);
+
+    MeshSubset fenceSubset{};
+    fenceSubset.indexStart = 6;
+    fenceSubset.indexCount = 6;
+    fenceSubset.materialIdx = 1;
+    m_subsets.push_back(fenceSubset);
+
+    m_gpuMaterials.clear();
+    m_gpuMaterials.resize(2);
+    m_gpuMaterials[0].diffuse = XMFLOAT4(0.72f, 0.72f, 0.68f, 1.0f);
+    m_gpuMaterials[0].specular = XMFLOAT4(0.08f, 0.08f, 0.08f, 1.0f);
+    m_gpuMaterials[0].specPower = 16.0f;
+    m_gpuMaterials[0].diffuseSrvHeapIndex = -1;
+    m_gpuMaterials[0].normalSrvHeapIndex = -1;
+    m_gpuMaterials[0].displacementSrvHeapIndex = -1;
+    m_gpuMaterials[0].hasNormalMap = false;
+    m_gpuMaterials[0].hasDisplacementMap = false;
+
+    constexpr UINT texWidth = 128;
+    constexpr UINT texHeight = 64;
+    TextureLoader::TextureData fenceTex{};
+    fenceTex.width = texWidth;
+    fenceTex.height = texHeight;
+    fenceTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    fenceTex.rowPitch = texWidth * 4;
+    fenceTex.pixels.resize(static_cast<size_t>(fenceTex.rowPitch) * texHeight);
+
+    for (UINT y = 0; y < texHeight; ++y)
+    {
+        for (UINT x = 0; x < texWidth; ++x)
+        {
+            const bool verticalBar = (x % 16u) < 7u;
+            const bool topRail = y < 7u;
+            const bool bottomRail = y >= texHeight - 7u;
+            const bool opaque = verticalBar || topRail || bottomRail;
+            const size_t idx = (static_cast<size_t>(y) * texWidth + x) * 4u;
+            fenceTex.pixels[idx + 0] = opaque ? 220 : 0;
+            fenceTex.pixels[idx + 1] = opaque ? 220 : 0;
+            fenceTex.pixels[idx + 2] = opaque ? 220 : 0;
+            fenceTex.pixels[idx + 3] = opaque ? 255 : 0;
+        }
+    }
+
+    ComPtr<ID3D12Resource> fenceTexture;
+    ComPtr<ID3D12Resource> fenceUpload;
+
+    ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
+    ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
+
+    if (!TextureLoader::CreateTexture(m_device.Get(), m_cmdList.Get(), fenceTex, fenceTexture, fenceUpload))
+    {
+        ThrowIfFailedRenderer(m_cmdList->Close());
+        ID3D12CommandList* lists[] = { m_cmdList.Get() };
+        m_cmdQueue->ExecuteCommandLists(1, lists);
+        WaitForGPU();
+        return false;
+    }
+
+    const UINT fenceSrv = m_nextSrvIndex++;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = fenceTex.format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(
+        m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        fenceSrv,
+        m_cbvSrvDescSize);
+    m_device->CreateShaderResourceView(fenceTexture.Get(), &srvDesc, cpuHandle);
+
+    ThrowIfFailedRenderer(m_cmdList->Close());
+    ID3D12CommandList* lists[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, lists);
+    WaitForGPU();
+
+    m_gpuMaterials[1].diffuse = XMFLOAT4(0.86f, 0.86f, 0.82f, 1.0f);
+    m_gpuMaterials[1].specular = XMFLOAT4(0.05f, 0.05f, 0.05f, 1.0f);
+    m_gpuMaterials[1].specPower = 8.0f;
+    m_gpuMaterials[1].diffuseSrvHeapIndex = static_cast<int>(fenceSrv);
+    m_gpuMaterials[1].normalSrvHeapIndex = -1;
+    m_gpuMaterials[1].displacementSrvHeapIndex = -1;
+    m_gpuMaterials[1].hasNormalMap = false;
+    m_gpuMaterials[1].hasDisplacementMap = false;
+    m_gpuMaterials[1].diffuseTexture = fenceTexture;
+    m_gpuMaterials[1].diffuseTextureUpload = fenceUpload;
+    m_extraTextures.push_back(fenceTexture);
+    m_extraTextureUploads.push_back(fenceUpload);
+
+    CreateBuffer(vertices, sizeof(vertices), &m_vertexBuffer);
+    CreateBuffer(indices, sizeof(indices), &m_indexBuffer);
+
+    m_vbView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
+    m_vbView.StrideInBytes = sizeof(Vertex);
+    m_vbView.SizeInBytes = sizeof(vertices);
+
+    m_ibView.BufferLocation = m_indexBuffer->GetGPUVirtualAddress();
+    m_ibView.Format = DXGI_FORMAT_R32_UINT;
+    m_ibView.SizeInBytes = sizeof(indices);
+
+    return true;
+}
+
 bool Renderer::LoadMassPrimitiveScene()
 {
     return LoadPrimitiveCubeScene();
