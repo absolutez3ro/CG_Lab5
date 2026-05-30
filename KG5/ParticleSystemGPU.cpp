@@ -91,13 +91,11 @@ bool ParticleSystemGPU::CompileShader(const wchar_t* file, const char* entry, co
             lastErr = static_cast<const char*>(errors->GetBufferPointer());
     }
 
-    std::string fileUtf8(file, file + std::wcslen(file));
-    std::string pathUtf8(lastPath.begin(), lastPath.end());
     std::ostringstream oss;
-    oss << "[Particles] Failed shader compile: file=" << fileUtf8
+    oss << "[Particles] Failed shader compile: file=<wide>"
         << " entry=" << entry << " target=" << target
         << " hr=0x" << std::hex << static_cast<unsigned long>(lastHr)
-        << " path=" << pathUtf8;
+        << " path=<wide>";
     if (!lastErr.empty()) oss << " err=" << lastErr;
     OutputDebugStringA((oss.str() + "\n").c_str());
     throw std::runtime_error(oss.str());

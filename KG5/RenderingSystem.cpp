@@ -92,6 +92,7 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     m_renderer.CreateBuffer(nullptr, sizeof(LightingContract::LocalLightConstants), &m_localLightsCB);
     m_renderer.CreateBuffer(nullptr, sizeof(RainProxyFrameConstants), &m_rainProxyFrameCB);
     m_renderer.CreateBuffer(nullptr, m_shadowFrameCbStride * ShadowCascadeCount, &m_shadowFrameCB);
+    m_renderer.CreateBuffer(nullptr, sizeof(PostProcessConstants), &m_postProcessCB);
 
     const UINT pointLightsBufferSize = static_cast<UINT>(sizeof(LightingContract::PointLightData) * LightingContract::MaxPointLights);
     m_renderer.CreateBuffer(nullptr, pointLightsBufferSize, &m_pointLightsUploadBuffer);
@@ -398,6 +399,7 @@ bool RenderingSystem::SwitchToDirtyScene()
     EnsureBillboardResources();
 
     m_particlesReinitRequested = false;
+    CreateOrResizeSceneColorResources(m_renderer.GetWidth(), m_renderer.GetHeight());
     UpdateViewMatrix();
     UpdateWindowTitle();
     m_renderer.WaitForIdle();
@@ -469,14 +471,26 @@ void RenderingSystem::UpdateWindowTitle() const
     if (!m_hwnd)
         return;
 
+    const wchar_t* postLabel = L"Scanner+VCR";
+    if (m_postProcessMode == 0) postLabel = L"Off";
+    else if (m_postProcessMode == 1) postLabel = L"Scanner";
+    else if (m_postProcessMode == 2) postLabel = L"VCR";
+    else if (m_postProcessMode == 4) postLabel = L"Nausea";
+    else if (m_postProcessMode == 5) postLabel = L"Nausea+VCR";
+    const wchar_t* vcrLabel = m_vcrStrongMode ? L"Strong" : L"Normal";
+    const wchar_t* nauseaLabel = m_nauseaStrongMode ? L"Strong" : L"Normal";
+
     if (m_activeSceneKind == DemoSceneKind::Sponza)
     {
         wchar_t title[256];
         swprintf_s(
             title,
-            L"[SPONZA] Deferred Renderer | Shadows: %s | Debug:%u | Particles: %u %s %s",
+            L"[SPONZA] Deferred Renderer | Shadows: %s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | Particles: %u %s %s",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
+            postLabel,
+            vcrLabel,
+            nauseaLabel,
             m_particles.GetAliveCountForDraw(),
             m_particles.IsEnabled() ? L"ON" : L"OFF",
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
@@ -492,28 +506,34 @@ void RenderingSystem::UpdateWindowTitle() const
 
         swprintf_s(
             title,
-            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u",
+            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | PostFX:%s | VCR:%s | Nausea:%s",
             modeLabel,
             m_visibleObjectCount,
             m_sceneObjectCount,
             m_cubeDrawCount,
-            m_billboardDrawCount);
+            m_billboardDrawCount,
+            postLabel,
+            vcrLabel,
+            nauseaLabel);
 
         SetWindowTextW(m_hwnd, title);
     }
     else if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
     {
         wchar_t title[256];
-        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f",
-            m_perlinNoiseSeed);
+        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | PostFX:%s | VCR:%s | Nausea:%s",
+            m_perlinNoiseSeed, postLabel, vcrLabel, nauseaLabel);
         SetWindowTextW(m_hwnd, title);
     }
     else
     {
         wchar_t title[256];
-        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows: %s | Debug:%u",
+        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows: %s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s",
             m_enableShadows ? L"ON" : L"OFF",
-            m_debugMode);
+            m_debugMode,
+            postLabel,
+            vcrLabel,
+            nauseaLabel);
         SetWindowTextW(m_hwnd, title);
     }
 }
@@ -1016,7 +1036,7 @@ void RenderingSystem::DebugLinePass()
     m_debugLineCB->Unmap(0, nullptr);
 
     auto cmdList = m_renderer.GetCmdList();
-    auto rtv = m_renderer.GetBackBufferRtv();
+    auto rtv = m_sceneColorRtv;
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmdList->SetGraphicsRootSignature(m_debugLineRS.Get());
     cmdList->SetPipelineState(m_debugLinePSO.Get());
@@ -1028,6 +1048,24 @@ void RenderingSystem::DebugLinePass()
 
 void RenderingSystem::OnKeyDown(WPARAM key)
 {
+    if (key == 'T')
+    {
+        m_postProcessMode = (m_postProcessMode + 1) % 6;
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'Y')
+    {
+        m_vcrStrongMode = !m_vcrStrongMode;
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'U')
+    {
+        m_nauseaStrongMode = !m_nauseaStrongMode;
+        UpdateWindowTitle();
+        return;
+    }
     if (key == 'Z')
     {
         RequestSceneSwitch(DemoSceneKind::Sponza);
@@ -1438,6 +1476,30 @@ void RenderingSystem::CreateRootSignatures()
         RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_shadowRS)));
     }
+    {
+        CD3DX12_DESCRIPTOR_RANGE sceneColorRange;
+        sceneColorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        CD3DX12_DESCRIPTOR_RANGE gbufferRange;
+        gbufferRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 1);
+        CD3DX12_DESCRIPTOR_RANGE depthRange;
+        depthRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+
+        CD3DX12_ROOT_PARAMETER params[4];
+        params[0].InitAsConstantBufferView(0);
+        params[1].InitAsDescriptorTable(1, &sceneColorRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[2].InitAsDescriptorTable(1, &gbufferRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[3].InitAsDescriptorTable(1, &depthRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {
+            CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP)
+        };
+
+        CD3DX12_ROOT_SIGNATURE_DESC desc(4, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        ComPtr<ID3DBlob> serialized, errors;
+        RS_ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors));
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&m_postProcessRS)));
+    }
 
 }
 
@@ -1523,8 +1585,11 @@ void RenderingSystem::CreatePSOs()
     compileShader(L"RainLightProxy.hlsl", "VSProxy", "vs_5_0", m_rainProxyVS);
     compileShader(L"DebugLine.hlsl", "VSMain", "vs_5_0", m_debugLineVS);
     compileShader(L"ShadowMap.hlsl", "VSMain", "vs_5_0", m_shadowVS);
+    compileShader(L"PostProcess.hlsl", "VSMain", "vs_5_0", m_postProcessVS);
+    ComPtr<ID3DBlob> postProcessPS;
+    compileShader(L"PostProcess.hlsl", "PSMain", "ps_5_0", postProcessPS);
 
-    if (!m_geoVS || !m_geoHS || !m_geoDS || !m_geoPS || !m_geoNoTessVS || !m_geoNoTessPS || !m_lightFullscreenVS || !m_rainProxyVS || !m_debugLineVS || !m_shadowVS)
+    if (!m_geoVS || !m_geoHS || !m_geoDS || !m_geoPS || !m_geoNoTessVS || !m_geoNoTessPS || !m_lightFullscreenVS || !m_rainProxyVS || !m_debugLineVS || !m_shadowVS || !m_postProcessVS)
     {
         throw std::runtime_error("CreatePSOs: one or more mandatory shader blobs are null after compilation.");
     }
@@ -1687,6 +1752,25 @@ void RenderingSystem::CreatePSOs()
         lineDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         lineDesc.SampleDesc.Count = 1;
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&lineDesc, IID_PPV_ARGS(&m_debugLinePSO)));
+    }
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC ppDesc{};
+        ppDesc.InputLayout = { nullptr, 0 };
+        ppDesc.pRootSignature = m_postProcessRS.Get();
+        ppDesc.VS = { m_postProcessVS->GetBufferPointer(), m_postProcessVS->GetBufferSize() };
+        ppDesc.PS = { postProcessPS->GetBufferPointer(), postProcessPS->GetBufferSize() };
+        ppDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        ppDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        ppDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        ppDesc.DepthStencilState.DepthEnable = FALSE;
+        ppDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        ppDesc.SampleMask = UINT_MAX;
+        ppDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        ppDesc.NumRenderTargets = 1;
+        ppDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        ppDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        ppDesc.SampleDesc.Count = 1;
+        RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&ppDesc, IID_PPV_ARGS(&m_postProcessPSO)));
     }
 }
 
@@ -2557,7 +2641,7 @@ void RenderingSystem::UploadPointLightsToGpu()
 void RenderingSystem::LightingPassDirectional()
 {
     auto cmdList = m_renderer.GetCmdList();
-    auto rtv = m_renderer.GetBackBufferRtv();
+    auto rtv = m_sceneColorRtv;
 
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmdList->SetGraphicsRootSignature(m_lightingDirectionalRS.Get());
@@ -2576,7 +2660,7 @@ void RenderingSystem::LightingPassDirectional()
 void RenderingSystem::LightingPassLocal()
 {
     auto cmdList = m_renderer.GetCmdList();
-    auto rtv = m_renderer.GetBackBufferRtv();
+    auto rtv = m_sceneColorRtv;
 
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmdList->SetGraphicsRootSignature(m_lightingLocalRS.Get());
@@ -2624,7 +2708,7 @@ void RenderingSystem::RainLightProxyPass()
     m_rainProxyFrameCB->Unmap(0, nullptr);
 
     auto cmdList = m_renderer.GetCmdList();
-    auto rtv = m_renderer.GetBackBufferRtv();
+    auto rtv = m_sceneColorRtv;
 
     cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     cmdList->SetGraphicsRootSignature(m_rainProxyRS.Get());
@@ -2691,6 +2775,10 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     UpdateLocalLightConstants();
     UploadPointLightsToGpu();
 
+    TransitionSceneColor(D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    cmdList->ClearRenderTargetView(m_sceneColorRtv, black, 0, nullptr);
+
     LightingPassDirectional();
 
     // Local lights are only needed in final and lighting debug modes.
@@ -2708,7 +2796,7 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     {
         m_particles.Render(
             cmdList,
-            m_renderer.GetBackBufferRtv(),
+            m_sceneColorRtv,
             m_renderer.GetDsvHandle(),
             m_view,
             m_proj,
@@ -2723,6 +2811,9 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
     {
         DebugLinePass();
     }
+
+    TransitionSceneColor(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    PostProcessPass(totalTime);
 
     if (m_rainDebugOutputEnabled)
     {
@@ -2763,6 +2854,7 @@ void RenderingSystem::OnResize(int width, int height)
     if (m_renderer.GetSrvHeap() == nullptr)
         return;
 
+    m_renderer.WaitForIdle();
     m_renderer.OnResize(width, height);
     m_gbuffer.Resize(
         m_renderer.GetDevice(),
@@ -2773,6 +2865,7 @@ void RenderingSystem::OnResize(int width, int height)
         m_renderer.GetGbufferSrvCpuStart(),
         m_renderer.GetGbufferSrvGpuStart(),
         m_renderer.GetSrvDescriptorSize());
+    CreateOrResizeSceneColorResources(static_cast<UINT>(width), static_cast<UINT>(height));
 
     const XMMATRIX proj = XMMatrixPerspectiveFovLH(
         XMConvertToRadians(60.0f),
@@ -2782,3 +2875,116 @@ void RenderingSystem::OnResize(int width, int height)
     XMStoreFloat4x4(&m_proj, XMMatrixTranspose(proj));
 }
 
+void RenderingSystem::CreateOrResizeSceneColorResources(UINT width, UINT height)
+{
+    if (width == 0 || height == 0)
+        return;
+    auto device = m_renderer.GetDevice();
+    if (!device)
+        return;
+
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    clearValue.Color[0] = 0.0f; clearValue.Color[1] = 0.0f; clearValue.Color[2] = 0.0f; clearValue.Color[3] = 1.0f;
+
+    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    m_sceneColor.Reset();
+    RS_ThrowIfFailed(device->CreateCommittedResource(
+        &heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
+        IID_PPV_ARGS(&m_sceneColor)));
+
+    m_sceneColorRtv = m_renderer.GetRtvCpuHandle(SceneColorRtvIndex);
+    m_sceneColorSrvCpu = m_renderer.GetSrvCpuHandle(SceneColorSrvIndex);
+    m_sceneColorSrvGpu = m_renderer.GetSrvGpuHandle(SceneColorSrvIndex);
+
+    device->CreateRenderTargetView(m_sceneColor.Get(), nullptr, m_sceneColorRtv);
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_sceneColor.Get(), &srvDesc, m_sceneColorSrvCpu);
+    m_sceneColorState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
+void RenderingSystem::TransitionSceneColor(D3D12_RESOURCE_STATES newState)
+{
+    if (!m_sceneColor)
+        return;
+    if (m_sceneColorState == newState)
+        return;
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_sceneColor.Get(), m_sceneColorState, newState);
+    m_renderer.GetCmdList()->ResourceBarrier(1, &barrier);
+    m_sceneColorState = newState;
+}
+
+void RenderingSystem::PostProcessPass(float totalTime)
+{
+    if (!m_postProcessPSO || !m_postProcessRS || !m_sceneColor || !m_postProcessCB)
+        return;
+
+    const float w = static_cast<float>(m_renderer.GetWidth());
+    const float h = static_cast<float>(m_renderer.GetHeight());
+    PostProcessConstants cb{};
+    cb.ScreenSize = XMFLOAT2(w, h);
+    cb.InvScreenSize = XMFLOAT2(1.0f / w, 1.0f / h);
+    cb.Time = totalTime;
+    cb.Mode = static_cast<UINT>(m_postProcessMode);
+    cb.EdgeStrength = 1.0f;
+    cb.DepthEdgeScale = 1.25f;
+    cb.NormalEdgeScale = 1.0f;
+    cb.LumaEdgeScale = 0.8f;
+    cb.VcrIntensity = m_vcrStrongMode ? 1.65f : 1.0f;
+    cb.ScanlineStrength = m_vcrStrongMode ? 0.32f : 0.20f;
+    cb.NoiseStrength = m_vcrStrongMode ? 0.13f : 0.08f;
+    cb.ChromaticAberration = m_vcrStrongMode ? 1.5f : 1.0f;
+    cb.ScannerIntensity = 1.0f;
+    cb.ScannerSpeed = 0.65f;
+    cb.ScannerLineWidth = 0.045f;
+    cb.ScannerTickStrength = 0.75f;
+    cb.NauseaIntensity = m_nauseaStrongMode ? 1.35f : 0.85f;
+    cb.NauseaSpeed = m_nauseaStrongMode ? 1.35f : 0.85f;
+    cb.KaleidoscopeSegments = m_nauseaStrongMode ? 8.0f : 6.0f;
+    cb.NauseaChromaticAberration = m_nauseaStrongMode ? 2.4f : 1.4f;
+    const XMMATRIX view = XMMatrixTranspose(XMLoadFloat4x4(&m_view));
+    const XMMATRIX proj = XMMatrixTranspose(XMLoadFloat4x4(&m_proj));
+    const XMMATRIX invViewProj = XMMatrixInverse(nullptr, view * proj);
+    XMStoreFloat4x4(&cb.InvViewProj, XMMatrixTranspose(invViewProj));
+    cb.EyePos = XMFLOAT4(m_cameraPos.x, m_cameraPos.y, m_cameraPos.z, 1.0f);
+    cb.ScannerMaxDistance = 1600.0f;
+    cb.ScannerWorldLineWidth = 35.0f;
+    cb.ScannerTrailLength = 180.0f;
+    cb.ScannerGridScale = 90.0f;
+
+    void* mapped = nullptr;
+    m_postProcessCB->Map(0, nullptr, &mapped);
+    memcpy(mapped, &cb, sizeof(cb));
+    m_postProcessCB->Unmap(0, nullptr);
+
+    auto cmdList = m_renderer.GetCmdList();
+    auto backbufferRtv = m_renderer.GetBackBufferRtv();
+    cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+    cmdList->SetGraphicsRootSignature(m_postProcessRS.Get());
+    cmdList->SetPipelineState(m_postProcessPSO.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_renderer.GetSrvHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+    cmdList->SetGraphicsRootConstantBufferView(0, m_postProcessCB->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootDescriptorTable(1, m_sceneColorSrvGpu);
+    cmdList->SetGraphicsRootDescriptorTable(2, m_gbuffer.GetFirstSrvGpu());
+    cmdList->SetGraphicsRootDescriptorTable(3, m_renderer.GetSrvGpuHandle(4));
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(6, 1, 0, 0);
+}

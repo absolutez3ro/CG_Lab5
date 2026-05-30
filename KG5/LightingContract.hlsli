@@ -25,7 +25,6 @@ struct SpotLightData
 {
     float3 Position;
     float Range;
-    // Direction points outward from the spotlight along cone axis.
     float3 Direction;
     float InnerCos;
     float3 Color;

@@ -110,6 +110,12 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE GetSrvGpuHandle(UINT index) const {
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetGPUDescriptorHandleForHeapStart(), index, m_cbvSrvDescSize);
     }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetRtvCpuHandle(UINT index) const {
+        return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_rtvHeap->GetCPUDescriptorHandleForHeapStart(), index, m_rtvDescSize);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle(UINT index) const {
+        return CD3DX12_CPU_DESCRIPTOR_HANDLE(m_cbvSrvHeap->GetCPUDescriptorHandleForHeapStart(), index, m_cbvSrvDescSize);
+    }
 
     // ВАЖНО: Хендлы для рендеринга
     D3D12_CPU_DESCRIPTOR_HANDLE GetBackBufferRtv() {
@@ -197,7 +203,7 @@ private:
 
     int m_width = 1280, m_height = 720;
     bool m_initialized = false;
-    UINT m_nextSrvIndex = 8;
+    UINT m_nextSrvIndex = 16;
 
     D3D12_VIEWPORT m_viewport{};
     D3D12_RECT m_scissorRect{};

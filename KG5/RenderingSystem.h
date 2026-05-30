@@ -9,6 +9,39 @@
 #include <random>
 #include <vector>
 
+
+struct alignas(256) PostProcessConstants
+{
+    XMFLOAT2 ScreenSize = { 1.0f, 1.0f };
+    XMFLOAT2 InvScreenSize = { 1.0f, 1.0f };
+    float Time = 0.0f;
+    UINT Mode = 3;
+    float EdgeStrength = 1.0f;
+    float DepthEdgeScale = 1.25f;
+    float NormalEdgeScale = 1.0f;
+    float LumaEdgeScale = 0.8f;
+    float VcrIntensity = 1.0f;
+    float ScanlineStrength = 0.20f;
+    float NoiseStrength = 0.08f;
+    float ChromaticAberration = 1.0f;
+    float ScannerIntensity = 1.0f;
+    float ScannerSpeed = 0.65f;
+    float ScannerLineWidth = 0.045f;
+    float ScannerTickStrength = 0.75f;
+    float NauseaIntensity = 0.85f;
+    float NauseaSpeed = 0.85f;
+    float KaleidoscopeSegments = 6.0f;
+    float NauseaChromaticAberration = 1.4f;
+    XMFLOAT2 Padding0 = { 0.0f, 0.0f };
+    XMFLOAT4X4 InvViewProj{};
+    XMFLOAT4 EyePos = { 0.0f, 0.0f, 0.0f, 1.0f };
+    float ScannerMaxDistance = 1600.0f;
+    float ScannerWorldLineWidth = 35.0f;
+    float ScannerTrailLength = 180.0f;
+    float ScannerGridScale = 90.0f;
+    float Padding[22] = {};
+};
+
 namespace RenderingShadowSettings
 {
     constexpr UINT CascadeCount = 4;
@@ -114,6 +147,9 @@ private:
     void ShadowPass();
     void LightingPassLocal();
     void RainLightProxyPass();
+    void PostProcessPass(float totalTime);
+    void CreateOrResizeSceneColorResources(UINT width, UINT height);
+    void TransitionSceneColor(D3D12_RESOURCE_STATES newState);
 
     void InitializeRainLightSystem();
     void SeedRainLightsForSponza();
@@ -152,6 +188,8 @@ private:
 
 private:
     static constexpr UINT PointLightsSrvIndex = 5;
+    static constexpr UINT SceneColorRtvIndex = 5;
+    static constexpr UINT SceneColorSrvIndex = 8;
     static constexpr UINT ShadowMapSrvIndex = 6;
     static constexpr UINT ShadowCascadeCount = RenderingShadowSettings::CascadeCount;
     static constexpr UINT ShadowMapResolution = RenderingShadowSettings::MapResolution;
@@ -168,6 +206,7 @@ private:
     ComPtr<ID3D12RootSignature> m_rainProxyRS;
     ComPtr<ID3D12RootSignature> m_debugLineRS;
     ComPtr<ID3D12RootSignature> m_shadowRS;
+    ComPtr<ID3D12RootSignature> m_postProcessRS;
 
     ComPtr<ID3D12PipelineState> m_geometryPSO;
     ComPtr<ID3D12PipelineState> m_geometryNoTessPSO;
@@ -176,6 +215,7 @@ private:
     ComPtr<ID3D12PipelineState> m_psoLocal;
     ComPtr<ID3D12PipelineState> m_psoRainProxy;
     ComPtr<ID3D12PipelineState> m_debugLinePSO;
+    ComPtr<ID3D12PipelineState> m_postProcessPSO;
 
     ComPtr<ID3DBlob> m_geoVS;
     ComPtr<ID3DBlob> m_geoHS;
@@ -187,6 +227,7 @@ private:
     ComPtr<ID3DBlob> m_rainProxyVS;
     ComPtr<ID3DBlob> m_debugLineVS;
     ComPtr<ID3DBlob> m_shadowVS;
+    ComPtr<ID3DBlob> m_postProcessVS;
 
     ComPtr<ID3D12Resource> m_objectTransformCB;
     ComPtr<ID3D12Resource> m_geometryFrameCB;
@@ -202,6 +243,8 @@ private:
     ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
     ComPtr<ID3D12Resource> m_shadowFrameCB;
     ComPtr<ID3D12Resource> m_shadowObjectTransformCB;
+    ComPtr<ID3D12Resource> m_postProcessCB;
+    ComPtr<ID3D12Resource> m_sceneColor;
     UINT m_objectTransformCbStride = 0;
     UINT m_materialCbStride = 0;
     UINT m_shadowFrameCbStride = 0;
@@ -215,6 +258,13 @@ private:
     bool m_enableFallingLights = false;
     bool m_enableGroundPlane = true;
     bool m_showCullingDebugGrid = false;
+    D3D12_RESOURCE_STATES m_sceneColorState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_CPU_DESCRIPTOR_HANDLE m_sceneColorRtv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_sceneColorSrvCpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE m_sceneColorSrvGpu{};
+    int m_postProcessMode = 3;
+    bool m_vcrStrongMode = false;
+    bool m_nauseaStrongMode = false;
 
     XMFLOAT4X4 m_view{};
     XMFLOAT4X4 m_proj{};

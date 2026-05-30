@@ -85,6 +85,9 @@
     <None Include="ParticleRender.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>
+    <None Include="PostProcess.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
     <None Include="packages.config" />
   </ItemGroup>
 </Project>

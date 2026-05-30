@@ -158,6 +158,7 @@
     <None Include="DebugLine.hlsl" />
     <None Include="ParticlesCS.hlsl" />
     <None Include="ParticleRender.hlsl" />
+    <None Include="PostProcess.hlsl" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -420,7 +420,7 @@ bool Renderer::LoadObj(const std::string& path)
     m_subsets = mesh.subsets;
     m_gpuMaterials.clear();
     m_gpuMaterials.resize(mesh.materials.size());
-    m_nextSrvIndex = 8;
+    m_nextSrvIndex = 16;
 
     const std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
 
@@ -781,9 +781,7 @@ int Renderer::LoadTextureToSrv(const std::wstring& texturePath)
     TextureLoader::TextureData texData;
     if (!TextureLoader::LoadFromFile(texturePath, texData))
     {
-        std::string path(texturePath.begin(), texturePath.end());
-        std::string msg = "[Billboard] Failed to load texture: " + path + "\n";
-        OutputDebugStringA(msg.c_str());
+        OutputDebugStringW((std::wstring(L"[Billboard] Failed to load texture: ") + texturePath + L"\n").c_str());
         return -1;
     }
 
@@ -979,7 +977,7 @@ bool Renderer::LoadAlphaTestShadowScene()
         4, 5, 6, 4, 6, 7
     };
 
-    m_nextSrvIndex = 8;
+    m_nextSrvIndex = 16;
     m_subsets.clear();
     MeshSubset floorSubset{};
     floorSubset.indexStart = 0;
