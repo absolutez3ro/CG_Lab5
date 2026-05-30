@@ -27,6 +27,10 @@ cbuffer PostProcessCB : register(b0)
     float gScannerWorldLineWidth;
     float gScannerTrailLength;
     float gScannerGridScale;
+    float gExposure;
+    float gGamma;
+    uint gToneMapperMode;
+    float gToneMapWhitePoint;
 };
 
 Texture2D<float4> gSceneColor : register(t0);
@@ -211,6 +215,61 @@ float3 ApplyNausea(float2 uv)
     return saturate(col);
 }
 
+float3 ToneMapReinhard(float3 hdr)
+{
+    return hdr / (hdr + 1.0);
+}
+
+float3 ToneMapExposure(float3 hdr)
+{
+    return 1.0 - exp(-hdr * gExposure);
+}
+
+float3 ToneMapACES(float3 x)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+float3 ApplyToneMapping(float3 hdr)
+{
+    hdr = max(hdr, 0.0);
+
+    if (gToneMapperMode == 0)
+    {
+        return saturate(hdr);
+    }
+    else if (gToneMapperMode == 1)
+    {
+        return ToneMapReinhard(hdr * gExposure);
+    }
+    else if (gToneMapperMode == 2)
+    {
+        return ToneMapExposure(hdr);
+    }
+    else
+    {
+        return ToneMapACES(hdr * gExposure);
+    }
+}
+
+float3 ApplyGammaCorrection(float3 linearColor)
+{
+    linearColor = saturate(linearColor);
+    float gamma = max(gGamma, 0.001);
+    return pow(linearColor, 1.0 / gamma);
+}
+
+float3 FinalColorTransform(float3 hdr)
+{
+    float3 ldr = ApplyToneMapping(hdr);
+    return ApplyGammaCorrection(ldr);
+}
+
 float4 PSMain(VSOut i) : SV_Target
 {
     float2 uv = i.Uv;
@@ -219,7 +278,7 @@ float4 PSMain(VSOut i) : SV_Target
 
     if (gMode == 0)
     {
-        return float4(scene, 1);
+        c = scene;
     }
     else if (gMode == 1)
     {
@@ -244,5 +303,6 @@ float4 PSMain(VSOut i) : SV_Target
         c = ApplyVCR(uv, c);
     }
 
-    return float4(saturate(c), 1);
+    float3 finalColor = FinalColorTransform(c);
+    return float4(finalColor, 1.0);
 }

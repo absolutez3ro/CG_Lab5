@@ -169,7 +169,7 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
     auto shadowSrvT6Cpu = CD3DX12_CPU_DESCRIPTOR_HANDLE(m_renderer.GetSrvHeap()->GetCPUDescriptorHandleForHeapStart(), ShadowMapSrvIndex + 1, m_renderer.GetSrvDescriptorSize());
     m_renderer.GetDevice()->CreateShaderResourceView(m_shadowMap.Get(), &shadowSrv, shadowSrvT6Cpu);
 
-        if (!m_particles.Initialize(&m_renderer))
+        if (!m_particles.Initialize(&m_renderer, SceneColorFormat))
             return false;
 
         // Start directly in Sponza for Lab6 smoke check. If load fails, fall back to Dirty scene.
@@ -479,18 +479,25 @@ void RenderingSystem::UpdateWindowTitle() const
     else if (m_postProcessMode == 5) postLabel = L"Nausea+VCR";
     const wchar_t* vcrLabel = m_vcrStrongMode ? L"Strong" : L"Normal";
     const wchar_t* nauseaLabel = m_nauseaStrongMode ? L"Strong" : L"Normal";
+    const wchar_t* toneLabel = L"ACES";
+    if (m_toneMapperMode == 0) toneLabel = L"None";
+    else if (m_toneMapperMode == 1) toneLabel = L"Reinhard";
+    else if (m_toneMapperMode == 2) toneLabel = L"Exposure";
 
     if (m_activeSceneKind == DemoSceneKind::Sponza)
     {
-        wchar_t title[256];
+        wchar_t title[512];
         swprintf_s(
             title,
-            L"[SPONZA] Deferred Renderer | Shadows: %s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | Particles: %u %s %s",
+            L"[SPONZA] Deferred Renderer | Shadows:%s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f | Particles:%u %s %s",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
             postLabel,
             vcrLabel,
             nauseaLabel,
+            toneLabel,
+            m_exposure,
+            m_gamma,
             m_particles.GetAliveCountForDraw(),
             m_particles.IsEnabled() ? L"ON" : L"OFF",
             m_particles.IsSortEnabled() ? L"SORT" : L"NOSORT");
@@ -506,7 +513,7 @@ void RenderingSystem::UpdateWindowTitle() const
 
         swprintf_s(
             title,
-            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | PostFX:%s | VCR:%s | Nausea:%s",
+            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
             modeLabel,
             m_visibleObjectCount,
             m_sceneObjectCount,
@@ -514,26 +521,32 @@ void RenderingSystem::UpdateWindowTitle() const
             m_billboardDrawCount,
             postLabel,
             vcrLabel,
-            nauseaLabel);
+            nauseaLabel,
+            toneLabel,
+            m_exposure,
+            m_gamma);
 
         SetWindowTextW(m_hwnd, title);
     }
     else if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
     {
-        wchar_t title[256];
-        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | PostFX:%s | VCR:%s | Nausea:%s",
-            m_perlinNoiseSeed, postLabel, vcrLabel, nauseaLabel);
+        wchar_t title[512];
+        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+            m_perlinNoiseSeed, postLabel, vcrLabel, nauseaLabel, toneLabel, m_exposure, m_gamma);
         SetWindowTextW(m_hwnd, title);
     }
     else
     {
-        wchar_t title[256];
-        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows: %s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s",
+        wchar_t title[512];
+        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows:%s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
             postLabel,
             vcrLabel,
-            nauseaLabel);
+            nauseaLabel,
+            toneLabel,
+            m_exposure,
+            m_gamma);
         SetWindowTextW(m_hwnd, title);
     }
 }
@@ -1063,6 +1076,24 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'U')
     {
         m_nauseaStrongMode = !m_nauseaStrongMode;
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == 'G')
+    {
+        m_toneMapperMode = (m_toneMapperMode + 1) % 4;
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == VK_OEM_PLUS)
+    {
+        m_exposure = std::clamp(m_exposure * 1.1f, 0.05f, 8.0f);
+        UpdateWindowTitle();
+        return;
+    }
+    if (key == VK_OEM_MINUS)
+    {
+        m_exposure = std::clamp(m_exposure / 1.1f, 0.05f, 8.0f);
         UpdateWindowTitle();
         return;
     }
@@ -1686,7 +1717,7 @@ void RenderingSystem::CreatePSOs()
         desc.SampleMask = UINT_MAX;
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         desc.NumRenderTargets = 1;
-        desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.RTVFormats[0] = SceneColorFormat;
         desc.SampleDesc.Count = 1;
 
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&outPSO)));
@@ -1719,7 +1750,7 @@ void RenderingSystem::CreatePSOs()
         proxyDesc.SampleMask = UINT_MAX;
         proxyDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         proxyDesc.NumRenderTargets = 1;
-        proxyDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        proxyDesc.RTVFormats[0] = SceneColorFormat;
         proxyDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         proxyDesc.SampleDesc.Count = 1;
 
@@ -1748,7 +1779,7 @@ void RenderingSystem::CreatePSOs()
         lineDesc.SampleMask = UINT_MAX;
         lineDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
         lineDesc.NumRenderTargets = 1;
-        lineDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        lineDesc.RTVFormats[0] = SceneColorFormat;
         lineDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
         lineDesc.SampleDesc.Count = 1;
         RS_ThrowIfFailed(m_renderer.GetDevice()->CreateGraphicsPipelineState(&lineDesc, IID_PPV_ARGS(&m_debugLinePSO)));
@@ -2889,13 +2920,13 @@ void RenderingSystem::CreateOrResizeSceneColorResources(UINT width, UINT height)
     desc.Height = height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Format = SceneColorFormat;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     D3D12_CLEAR_VALUE clearValue{};
-    clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    clearValue.Format = SceneColorFormat;
     clearValue.Color[0] = 0.0f; clearValue.Color[1] = 0.0f; clearValue.Color[2] = 0.0f; clearValue.Color[3] = 1.0f;
 
     auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -2912,7 +2943,7 @@ void RenderingSystem::CreateOrResizeSceneColorResources(UINT width, UINT height)
     device->CreateRenderTargetView(m_sceneColor.Get(), nullptr, m_sceneColorRtv);
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.Format = SceneColorFormat;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MostDetailedMip = 0;
     srvDesc.Texture2D.MipLevels = 1;
@@ -2968,6 +2999,10 @@ void RenderingSystem::PostProcessPass(float totalTime)
     cb.ScannerWorldLineWidth = 35.0f;
     cb.ScannerTrailLength = 180.0f;
     cb.ScannerGridScale = 90.0f;
+    cb.Exposure = m_exposure;
+    cb.Gamma = m_gamma;
+    cb.ToneMapperMode = m_toneMapperMode;
+    cb.ToneMapWhitePoint = 11.2f;
 
     void* mapped = nullptr;
     m_postProcessCB->Map(0, nullptr, &mapped);

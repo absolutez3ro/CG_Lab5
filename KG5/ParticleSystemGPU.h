@@ -28,7 +28,7 @@ public:
         float Padding1;
     };
 
-    bool Initialize(Renderer* renderer);
+    bool Initialize(Renderer* renderer, DXGI_FORMAT renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM);
     void Shutdown();
     void Reinitialize(ID3D12GraphicsCommandList* cmdList);
 
@@ -160,6 +160,7 @@ private:
     uint32_t m_aliveCountForDraw = 0;
     uint32_t m_frameCounter = 0;
     uint32_t m_emitPerFrame = 48;
+    DXGI_FORMAT m_renderTargetFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_computeRS;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_renderRS;

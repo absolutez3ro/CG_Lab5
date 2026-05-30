@@ -17,12 +17,13 @@ static void PS_ThrowIfFailed(HRESULT hr, const char* msg)
     if (FAILED(hr)) throw std::runtime_error(msg);
 }
 
-bool ParticleSystemGPU::Initialize(Renderer* renderer)
+bool ParticleSystemGPU::Initialize(Renderer* renderer, DXGI_FORMAT renderTargetFormat)
 {
     if (m_initialized)
         return true;
 
     m_renderer = renderer;
+    m_renderTargetFormat = renderTargetFormat;
     if (!m_renderer)
         return false;
 
@@ -198,7 +199,7 @@ bool ParticleSystemGPU::CreatePipelines()
     gps.SampleMask = UINT_MAX;
     gps.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     gps.NumRenderTargets = 1;
-    gps.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    gps.RTVFormats[0] = m_renderTargetFormat;
     gps.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     gps.SampleDesc.Count = 1;
     PS_ThrowIfFailed(device->CreateGraphicsPipelineState(&gps, IID_PPV_ARGS(&m_renderPso)), "Particle render PSO failed");

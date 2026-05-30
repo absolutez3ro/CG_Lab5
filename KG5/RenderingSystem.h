@@ -39,7 +39,11 @@ struct alignas(256) PostProcessConstants
     float ScannerWorldLineWidth = 35.0f;
     float ScannerTrailLength = 180.0f;
     float ScannerGridScale = 90.0f;
-    float Padding[22] = {};
+    float Exposure = 1.0f;
+    float Gamma = 2.2f;
+    UINT ToneMapperMode = 3;
+    float ToneMapWhitePoint = 11.2f;
+    float Padding[18] = {};
 };
 
 namespace RenderingShadowSettings
@@ -190,6 +194,7 @@ private:
     static constexpr UINT PointLightsSrvIndex = 5;
     static constexpr UINT SceneColorRtvIndex = 5;
     static constexpr UINT SceneColorSrvIndex = 8;
+    static constexpr DXGI_FORMAT SceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     static constexpr UINT ShadowMapSrvIndex = 6;
     static constexpr UINT ShadowCascadeCount = RenderingShadowSettings::CascadeCount;
     static constexpr UINT ShadowMapResolution = RenderingShadowSettings::MapResolution;
@@ -265,6 +270,9 @@ private:
     int m_postProcessMode = 3;
     bool m_vcrStrongMode = false;
     bool m_nauseaStrongMode = false;
+    UINT m_toneMapperMode = 3;
+    float m_exposure = 1.0f;
+    float m_gamma = 2.2f;
 
     XMFLOAT4X4 m_view{};
     XMFLOAT4X4 m_proj{};
