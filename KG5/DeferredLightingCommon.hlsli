@@ -1,20 +1,16 @@
 #ifndef DEFERRED_LIGHTING_COMMON_HLSLI
 #define DEFERRED_LIGHTING_COMMON_HLSLI
 
-// Normal is stored in [0,1], remap to [-1,1] and normalize.
 float3 DecodeNormal(float3 encodedNormal)
 {
     return normalize(encodedNormal * 2.0f - 1.0f);
 }
 
-// Treat depth values close to far plane as background (no scene geometry).
 bool HasValidSurface(float depth)
 {
     return depth < 0.999999f;
 }
 
-// Reconstruct world position from sampled depth in D3D clip-space convention.
-// Matrices are uploaded transposed from C++, so we use row-vector mul in HLSL.
 float3 ReconstructWorldPosition(float2 uv, float depth, float4x4 invViewProj)
 {
     const float2 ndc = float2(uv.x * 2.0f - 1.0f, (1.0f - uv.y) * 2.0f - 1.0f);
@@ -35,9 +31,26 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     return a2 / max(PI * denom * denom, 1e-6f);
 }
 
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    roughness = clamp(roughness, 0.04f, 1.0f);
+
+    const float alpha = roughness * roughness;
+    const float alpha2 = alpha * alpha;
+
+    const float NdotH = max(dot(N, H), 0.0f);
+    if (NdotH <= 0.0f)
+        return 0.0f;
+
+    const float NdotH2 = NdotH * NdotH;
+    const float tanTheta2 = (1.0f - NdotH2) / max(NdotH2, 1e-6f);
+
+    const float denom = PI * alpha2 * NdotH2 * NdotH2;
+    return exp(-tanTheta2 / max(alpha2, 1e-6f)) / max(denom, 1e-6f);
+}
+
 float GeometrySchlickGGX(float NdotV, float roughness)
 {
-    // Direct-lighting Smith term from LearnOpenGL: k = (r + 1)^2 / 8.
     const float r = roughness + 1.0f;
     const float k = (r * r) / 8.0f;
     return NdotV / max(NdotV * (1.0f - k) + k, 1e-6f);
@@ -45,7 +58,6 @@ float GeometrySchlickGGX(float NdotV, float roughness)
 
 float GeometrySchlickGGX_IBL(float NdotV, float roughness)
 {
-    // IBL uses the less aggressive k = roughness^2 / 2 remapping.
     const float k = (roughness * roughness) / 2.0f;
     return NdotV / max(NdotV * (1.0f - k) + k, 1e-6f);
 }
@@ -69,7 +81,7 @@ float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
     return F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-float3 ComputePBRDirectLight(float3 N, float3 V, float3 L, float3 albedo, float metallic, float roughness, float3 radiance)
+float3 ComputePBRDirectLight(float3 N, float3 V, float3 L, float3 albedo, float metallic, float roughness, float3 radiance, uint microfacetDistribution)
 {
     N = normalize(N);
     V = normalize(V);
@@ -84,7 +96,9 @@ float3 ComputePBRDirectLight(float3 N, float3 V, float3 L, float3 albedo, float 
         return 0.0f;
 
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float NDF = DistributionGGX(N, H, roughness);
+    const float NDF = (microfacetDistribution == 1)
+        ? DistributionBeckmann(N, H, roughness)
+        : DistributionGGX(N, H, roughness);
     const float G = GeometrySmith(N, V, L, roughness, true);
     const float3 F = FresnelSchlick(max(dot(H, V), 0.0f), F0);
 
@@ -95,9 +109,6 @@ float3 ComputePBRDirectLight(float3 N, float3 V, float3 L, float3 albedo, float 
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
-// Educational attenuation model:
-// - smooth range fade to guarantee zero at range limit
-// - mild distance term to avoid unrealistically flat intensity near the source
 float ComputeRangeAttenuation(float distanceToLight, float range)
 {
     const float d = distanceToLight / max(range, 1e-4f);
@@ -109,8 +120,6 @@ float ComputeRangeAttenuation(float distanceToLight, float range)
     return max(smoothRange * distanceTerm, 0.0f);
 }
 
-// Convention: spotDirection points outward from light position along cone axis.
-// L points from shaded point towards the light, therefore compare axis with -L.
 float ComputeSpotConeAttenuation(float3 L, float3 spotDirection, float innerCos, float outerCos)
 {
     const float cosTheta = dot(-L, normalize(spotDirection));

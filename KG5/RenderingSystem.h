@@ -324,6 +324,7 @@ private:
     bool m_showIBLSkybox = false;
     float m_iblDiffuseStrength = 1.0f;
     float m_iblSpecularStrength = 1.0f;
+    UINT m_microfacetDistribution = 0;
     // Geometry debug modes:
     // 0 = regular shaded output
     // 1 = transformed normal visualization

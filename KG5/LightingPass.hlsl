@@ -1,7 +1,6 @@
 #include "LightingContract.hlsli"
 #include "DeferredLightingCommon.hlsli"
 
-// GBuffer textures from geometry pass.
 Texture2D gAlbedoTex   : register(t0);
 Texture2D gNormalTex   : register(t1);
 Texture2D gMaterialTex : register(t2);
@@ -69,7 +68,6 @@ SurfaceData LoadSurface(float2 uv)
     s.Albedo = gAlbedoTex.Sample(gSampler, uv).rgb;
     s.Normal = DecodeNormal(gNormalTex.Sample(gSampler, uv).xyz);
 
-    // Material GBuffer is PBR packed as metallic, roughness and ambient occlusion.
     float4 material = gMaterialTex.Sample(gSampler, uv);
     s.Metallic = saturate(material.r);
     s.Roughness = clamp(material.g, 0.04f, 1.0f);
@@ -94,9 +92,6 @@ SurfaceData LoadSurface(float2 uv)
 
 float3 GetIBLSampleDirection(float3 dir)
 {
-    // Keep the production cubemap orientation unchanged. If an imported cubemap
-    // looks mirrored during a demo, this helper is the only place to add a
-    // temporary debug-only axis flip such as float3(dir.x, dir.y, -dir.z).
     return dir;
 }
 
@@ -136,7 +131,6 @@ float GetShadowPCF(float3 worldPos, uint cascadeIndex)
         return 1.0f;
     }
 
-    // 3x3 hardware PCF: SampleCmpLevelZero performs comparison filtering in the shadow map.
     const float texelSize = 1.0f / max(gFrame.ShadowMapSize, 1.0f);
     float shadow = 0.0f;
     [unroll]
@@ -168,8 +162,6 @@ float GetShadowFactorRaw(float3 worldPos)
 
 float ApplyShadowVisibility(float rawShadow)
 {
-    // Keep some directional light visible even if the CSM fit/bias is still being tuned.
-    // DebugMode 8 below still shows the raw PCF mask, so real shadow problems remain visible.
     const float minLitInShadow = 0.28f;
     return lerp(minLitInShadow, 1.0f, saturate(rawShadow));
 }
@@ -197,7 +189,7 @@ float3 EvaluateDirectionalLight(SurfaceData s)
 {
     float3 L = normalize(-gFrame.DirectionalLight.Direction);
     float3 radiance = gFrame.DirectionalLight.Color * gFrame.DirectionalLight.Intensity;
-    return ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance);
+    return ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance, gFrame.MicrofacetDistribution);
 }
 
 float3 EvaluatePointLights(SurfaceData s)
@@ -217,7 +209,7 @@ float3 EvaluatePointLights(SurfaceData s)
         float3 L = lightVec / dist;
         float attenuation = max(ComputeRangeAttenuation(dist, light.Range), 0.0f);
         float3 radiance = light.Color * (light.Intensity * attenuation);
-        sum += ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance);
+        sum += ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance, gFrame.MicrofacetDistribution);
     }
     return sum;
 }
@@ -242,7 +234,7 @@ float3 EvaluateSpotLights(SurfaceData s)
             continue;
 
         float3 radiance = gLocalLights.SpotLights[i].Color * (gLocalLights.SpotLights[i].Intensity * attenuation * cone);
-        sum += ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance);
+        sum += ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance, gFrame.MicrofacetDistribution);
     }
     return sum;
 }
@@ -259,11 +251,9 @@ float3 EvaluateIBL(SurfaceData s)
     float3 kS = F;
     float3 kD = (1.0f - kS) * (1.0f - s.Metallic);
 
-    // Irradiance map supplies diffuse image-based lighting.
     float3 irradiance = gIrradianceMap.Sample(gIBLSampler, N).rgb;
     float3 diffuse = irradiance * s.Albedo;
 
-    // Prefiltered environment map plus BRDF integration LUT supply specular IBL/reflections.
     const float MAX_REFLECTION_LOD = 11.0f;
     float3 prefilteredColor = gPrefilterMap.SampleLevel(gIBLSampler, R, s.Roughness * MAX_REFLECTION_LOD).rgb;
     float2 brdf = gBRDFLUT.Sample(gIBLSampler, float2(NdotV, s.Roughness)).rg;
@@ -279,7 +269,6 @@ float VisualizeDepth(float depth)
     if (!HasValidSurface(depth))
         return 0.0f;
 
-    // Readable depth visualization for non-linear depth buffer.
     return pow(saturate(1.0f - depth), 0.35f);
 }
 
@@ -356,6 +345,14 @@ float4 PSDirectional(VSFullscreenOutput pin) : SV_Target
     if (gFrame.DebugMode == 13)
     {
         return float4(s.Metallic, s.Roughness, s.AO, 1.0f);
+    }
+    if (gFrame.DebugMode == 14)
+    {
+        const float3 L = normalize(-gFrame.DirectionalLight.Direction);
+        const float3 radiance = gFrame.DirectionalLight.Color * gFrame.DirectionalLight.Intensity;
+        const float3 ggx = ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance, 0u);
+        const float3 beckmann = ComputePBRDirectLight(s.Normal, s.ViewDir, L, s.Albedo, s.Metallic, s.Roughness, radiance, 1u);
+        return float4(abs(ggx - beckmann) * 8.0f, 1.0f);
     }
 
     const float shadowFactor = GetShadowFactor(s.WorldPos);

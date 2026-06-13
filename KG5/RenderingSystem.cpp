@@ -192,6 +192,7 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
         }
 
         m_initialized = true;
+        OutputDebugStringA("[PBR] Microfacet distribution: GGX\n");
         UpdateWindowTitle();
         return true;
     }
@@ -1029,15 +1030,17 @@ void RenderingSystem::UpdateWindowTitle() const
     if (m_toneMapperMode == 0) toneLabel = L"None";
     else if (m_toneMapperMode == 1) toneLabel = L"Reinhard";
     else if (m_toneMapperMode == 2) toneLabel = L"Exposure";
+    const wchar_t* ndfLabel = (m_microfacetDistribution == 0) ? L"GGX" : L"Beckmann";
 
     if (m_activeSceneKind == DemoSceneKind::Sponza)
     {
         wchar_t title[512];
         swprintf_s(
             title,
-            L"[SPONZA] Deferred Renderer | Shadows:%s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f | Particles:%u %s %s",
+            L"[SPONZA] Deferred Renderer | Shadows:%s | Debug:%u | NDF:%s | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f | Particles:%u %s %s",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
+            ndfLabel,
             postLabel,
             vcrLabel,
             nauseaLabel,
@@ -1059,12 +1062,13 @@ void RenderingSystem::UpdateWindowTitle() const
 
         swprintf_s(
             title,
-            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+            L"%s INSTANCING: %u / %u visible | cubes:%u billboards:%u | NDF:%s | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
             modeLabel,
             m_visibleObjectCount,
             m_sceneObjectCount,
             m_cubeDrawCount,
             m_billboardDrawCount,
+            ndfLabel,
             postLabel,
             vcrLabel,
             nauseaLabel,
@@ -1077,16 +1081,17 @@ void RenderingSystem::UpdateWindowTitle() const
     else if (m_activeSceneKind == DemoSceneKind::PerlinPlane)
     {
         wchar_t title[512];
-        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
-            m_perlinNoiseSeed, postLabel, vcrLabel, nauseaLabel, toneLabel, m_exposure, m_gamma);
+        swprintf_s(title, L"[PERLIN PLANE] seed=%.0f | NDF:%s | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+            m_perlinNoiseSeed, ndfLabel, postLabel, vcrLabel, nauseaLabel, toneLabel, m_exposure, m_gamma);
         SetWindowTextW(m_hwnd, title);
     }
     else if (m_activeSceneKind == DemoSceneKind::PBRModel)
     {
         wchar_t title[512];
-        swprintf_s(title, L"[PBR MODEL] B scene | Shadows:%s | Debug:%u | Mirror:%s | Skybox:%s | IBLspec:%.2f | PostFX:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+        swprintf_s(title, L"[PBR MODEL] B scene | Shadows:%s | Debug:%u | NDF:%s | Mirror:%s | Skybox:%s | IBLspec:%.2f | PostFX:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
+            ndfLabel,
             m_forceMirrorMaterial ? L"ON" : L"OFF",
             m_showIBLSkybox ? L"ON" : L"OFF",
             m_iblSpecularStrength,
@@ -1099,9 +1104,10 @@ void RenderingSystem::UpdateWindowTitle() const
     else
     {
         wchar_t title[512];
-        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows:%s | Debug:%u | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+        swprintf_s(title, L"[ALPHA SHADOW TEST] V scene | Shadows:%s | Debug:%u | NDF:%s | PostFX:%s | VCR:%s | Nausea:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
             m_enableShadows ? L"ON" : L"OFF",
             m_debugMode,
+            ndfLabel,
             postLabel,
             vcrLabel,
             nauseaLabel,
@@ -1730,6 +1736,15 @@ void RenderingSystem::OnKeyDown(WPARAM key)
         UpdateWindowTitle();
         return;
     }
+    if (key == 'N')
+    {
+        m_microfacetDistribution = (m_microfacetDistribution == 0) ? 1u : 0u;
+        OutputDebugStringA(m_microfacetDistribution == 0
+            ? "[PBR] Microfacet distribution: GGX\n"
+            : "[PBR] Microfacet distribution: Beckmann\n");
+        UpdateWindowTitle();
+        return;
+    }
 
     if (key == 'W') m_moveForward = true;
     if (key == 'S') m_moveBackward = true;
@@ -1821,6 +1836,7 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     // 11=IBL specular/reflections only
     // 12=sampled prefiltered environment only
     // 13=material buffer (metallic, roughness, AO)
+    // 14=abs direct-light GGX-vs-Beckmann difference
     if (key >= '0' && key <= '9')
     {
         m_debugMode = static_cast<UINT>(key - '0');
@@ -1829,7 +1845,8 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == VK_F10) { m_debugMode = 10; UpdateWindowTitle(); }
     if (key == VK_F11) { m_debugMode = 11; UpdateWindowTitle(); }
     if (key == VK_F12) { m_debugMode = 12; UpdateWindowTitle(); }
-    if (key == 'N' && m_activeSceneKind == DemoSceneKind::PBRModel) { m_debugMode = 13; UpdateWindowTitle(); }
+    if (key == 'J' && m_activeSceneKind == DemoSceneKind::PBRModel) { m_debugMode = 13; UpdateWindowTitle(); }
+    if (key == 'K' && m_activeSceneKind == DemoSceneKind::PBRModel) { m_debugMode = 14; UpdateWindowTitle(); }
 
     // Geometry debug visualization (F1..F4):
     // F1 = regular render
@@ -3282,6 +3299,7 @@ void RenderingSystem::UpdateFrameConstants()
     cb.PointLightCount = (std::min)(m_activePointLights, LightingContract::MaxPointLights);
     cb.SpotLightCount = m_activeSpotLights;
     cb.DebugMode = m_debugMode;
+    cb.MicrofacetDistribution = m_microfacetDistribution;
     cb.ForceMirrorMaterial = (m_activeSceneKind == DemoSceneKind::PBRModel && m_forceMirrorMaterial) ? 1u : 0u;
     cb.IBLDiffuseStrength = m_iblDiffuseStrength;
     cb.IBLSpecularStrength = m_iblSpecularStrength;

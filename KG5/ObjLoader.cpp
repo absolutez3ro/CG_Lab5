@@ -39,7 +39,6 @@ static std::string ExtractTexturePath(std::istringstream& ss)
 	std::string part;
 	while (ss >> part)
 	{
-		// Skip common MTL texture options and their immediate numeric/string arguments.
 		if (!part.empty() && part[0] == '-')
 		{
 			const std::string opt = ToLowerCopy(part);
@@ -198,11 +197,8 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 			}
 			else if (tokenLower == "d")
 			{
-				// In Sponza's MTL, d=0 is incorrectly used but means opaque.
-				// Only treat as transparent if d is between 0 and 1 exclusive.
 				float d = 1.f;
 				ss >> d;
-				// Clamp: if d==0 treat as fully opaque (Sponza quirk)
 				cur.diffuse.w = (d <= 0.f) ? 1.f : d;
 			}
 			else if (tokenLower == "tr")
@@ -255,10 +251,8 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 	std::vector<XMFLOAT3> positions;
 	std::vector<XMFLOAT3> normals;
 	std::vector<XMFLOAT2> uvs;
-	// Key: (posIdx, uvIdx, normIdx) -> output vertex index
 	std::map<std::tuple<int, int, int>, UINT> vertexMap;
 	int curMatIdx = -1;
-	// Helper: close current subset and set its indexCount
 	auto CloseSubset = [&]()
 		{
 			if (!out.subsets.empty())
@@ -267,7 +261,6 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 				last.indexCount = (UINT)out.indices.size() - last.indexStart;
 			}
 		};
-	// Helper: open a new subset
 	auto OpenSubset = [&](int matIdx)
 		{
 			CloseSubset();
@@ -278,7 +271,6 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 			out.subsets.push_back(s);
 			curMatIdx = matIdx;
 		};
-	// Open default subset
 	OpenSubset(-1);
 	std::string line;
 	while (std::getline(f, line))
@@ -331,12 +323,10 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 		}
 		else if (token == "f")
 		{
-			// Parse face vertices
 			std::vector<UINT> faceVerts;
 			std::string vert;
 			while (ss >> vert)
 			{
-				// Replace '/' with space for easy parsing
 				for (char& c : vert) if (c == '/') c = ' ';
 				std::istringstream vs(vert);
 				int pi = 0, ti = 0, ni = 0;
@@ -369,7 +359,6 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 					faceVerts.push_back(it->second);
 				}
 			}
-			// Triangulate (fan)
 			for (size_t i = 1; i + 1 < faceVerts.size(); ++i)
 			{
 				out.indices.push_back(faceVerts[0]);
@@ -378,10 +367,8 @@ bool ObjLoader::Load(const std::string& path, ObjMesh& out)
 			}
 		}
 	}
-	// Close last subset
 	CloseSubset();
 
-	// Build tangents/bitangents from indexed triangles.
 	if (!out.vertices.empty() && !out.indices.empty())
 	{
 		std::vector<XMFLOAT3> tanAccum(out.vertices.size(), XMFLOAT3(0.f, 0.f, 0.f));

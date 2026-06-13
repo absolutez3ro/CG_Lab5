@@ -254,7 +254,6 @@ PSOutput PSMain(DSOutput pin)
     const float finalAlpha = textureAlpha * gMaterialDiffuse.a;
     clip(finalAlpha - 0.5f);
     albedo.a = finalAlpha;
-    // Texture albedo is authored in sRGB; convert only color data to linear for PBR lighting.
     if (gHasTexture != 0)
     {
         albedo.rgb = pow(saturate(albedo.rgb), float3(2.2f, 2.2f, 2.2f));
@@ -310,7 +309,6 @@ PSOutput PSMain(DSOutput pin)
         return o;
     }
 
-    // Material GBuffer stores PBR controls: metallic, roughness and ambient occlusion.
     const float metallic = (gHasMetallicMap != 0) ? saturate(gMetallicMap.Sample(gSampler, pin.TexCoord).r) : 0.0f;
     float roughness = (gHasRoughnessMap != 0)
         ? gRoughnessMap.Sample(gSampler, pin.TexCoord).r

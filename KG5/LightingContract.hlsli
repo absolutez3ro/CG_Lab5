@@ -50,11 +50,13 @@ struct LightingFrameConstants
     uint PointLightCount;
     uint SpotLightCount;
     uint DebugMode;
+    uint MicrofacetDistribution;
     uint ForceMirrorMaterial;
     float IBLDiffuseStrength;
     float IBLSpecularStrength;
     uint ShowIBLSkybox;
-    uint4 Padding[15];
+    uint4 Padding[14];
+    uint3 PaddingTail;
 };
 
 struct LocalLightConstants
