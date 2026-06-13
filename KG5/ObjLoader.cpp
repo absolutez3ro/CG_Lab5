@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <filesystem>
 // -------------------------------------------------------
 // String helpers
 // -------------------------------------------------------
@@ -25,6 +26,136 @@ static int ResolveIndex(int idx, int total)
 	if (idx < 0) return total + idx;
 	return idx - 1;
 }
+
+static std::string ToLowerCopy(std::string value)
+{
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return value;
+}
+
+static std::string ExtractTexturePath(std::istringstream& ss)
+{
+	std::vector<std::string> parts;
+	std::string part;
+	while (ss >> part)
+	{
+		// Skip common MTL texture options and their immediate numeric/string arguments.
+		if (!part.empty() && part[0] == '-')
+		{
+			const std::string opt = ToLowerCopy(part);
+			int argsToSkip = 0;
+			if (opt == "-bm" || opt == "-boost" || opt == "-imfchan" || opt == "-type") argsToSkip = 1;
+			else if (opt == "-o" || opt == "-s" || opt == "-t") argsToSkip = 3;
+			for (int i = 0; i < argsToSkip && (ss >> part); ++i) {}
+			continue;
+		}
+		parts.push_back(part);
+	}
+
+	if (parts.empty())
+		return {};
+
+	std::string tex;
+	for (size_t i = 0; i < parts.size(); ++i)
+	{
+		if (i != 0) tex += ' ';
+		tex += parts[i];
+	}
+	tex = Trim(tex);
+	for (char& c : tex) if (c == '\\') c = '/';
+	if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
+		tex = tex.substr(2);
+	return tex;
+}
+
+static bool FileExistsRelativeTo(const std::filesystem::path& mtlDir, const std::string& relPath)
+{
+	if (relPath.empty())
+		return false;
+	return std::filesystem::exists(mtlDir / std::filesystem::path(relPath));
+}
+
+static void AddCandidate(std::vector<std::string>& candidates, const std::filesystem::path& parent, const std::string& stem, const std::string& ext)
+{
+	if (stem.empty())
+		return;
+	std::filesystem::path p = parent / (stem + ext);
+	std::string candidate = p.generic_string();
+	if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end())
+		candidates.push_back(candidate);
+}
+
+static bool ReplaceCaseInsensitive(std::string value, const std::string& needle, const std::string& replacement, std::string& out)
+{
+	std::string lower = ToLowerCopy(value);
+	std::string lowerNeedle = ToLowerCopy(needle);
+	const size_t pos = lower.find(lowerNeedle);
+	if (pos == std::string::npos)
+		return false;
+	value.replace(pos, needle.size(), replacement);
+	out = value;
+	return true;
+}
+
+static bool ReplaceSuffixCaseInsensitive(std::string value, const std::string& suffix, const std::string& replacement, std::string& out)
+{
+	std::string lower = ToLowerCopy(value);
+	std::string lowerSuffix = ToLowerCopy(suffix);
+	if (lower.size() < lowerSuffix.size() || lower.compare(lower.size() - lowerSuffix.size(), lowerSuffix.size(), lowerSuffix) != 0)
+		return false;
+	value.replace(value.size() - suffix.size(), suffix.size(), replacement);
+	out = value;
+	return true;
+}
+
+static std::string FindSiblingPbrTexture(const std::string& diffuseTexture, const std::filesystem::path& mtlDir, const std::vector<std::string>& replacements)
+{
+	if (diffuseTexture.empty())
+		return {};
+
+	const std::filesystem::path diffuseRel(diffuseTexture);
+	const std::filesystem::path parent = diffuseRel.parent_path();
+	const std::string stem = diffuseRel.stem().string();
+	const std::string ext = diffuseRel.extension().string();
+	std::vector<std::string> candidates;
+
+	std::string replaced;
+	for (const std::string& rep : replacements)
+	{
+		if (ReplaceSuffixCaseInsensitive(stem, "_Albedo", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceCaseInsensitive(stem, "Albedo", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceCaseInsensitive(stem, "BaseColor", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceCaseInsensitive(stem, "Diffuse", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceSuffixCaseInsensitive(stem, "_diff", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceSuffixCaseInsensitive(stem, "_dif", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+		if (ReplaceSuffixCaseInsensitive(stem, "_A", rep, replaced)) AddCandidate(candidates, parent, replaced, ext);
+	}
+
+	for (const std::string& candidate : candidates)
+	{
+		if (FileExistsRelativeTo(mtlDir, candidate))
+			return candidate;
+	}
+	return {};
+}
+
+static void PopulatePbrTextureFallbacks(const std::string& mtlPath, std::vector<Material>& mats)
+{
+	const std::filesystem::path mtlDir = std::filesystem::path(mtlPath).parent_path();
+	for (Material& m : mats)
+	{
+		if (m.diffuseTexture.empty())
+			continue;
+		if (m.metallicTexture.empty())
+			m.metallicTexture = FindSiblingPbrTexture(m.diffuseTexture, mtlDir, { "_Metallic", "Metallic", "_M" });
+		if (m.roughnessTexture.empty())
+			m.roughnessTexture = FindSiblingPbrTexture(m.diffuseTexture, mtlDir, { "_Roughness", "Roughness", "_R" });
+		if (m.normalTexture.empty())
+			m.normalTexture = FindSiblingPbrTexture(m.diffuseTexture, mtlDir, { "_Normal_LOD0", "_Normal", "Normal", "_N" });
+		if (m.aoTexture.empty())
+			m.aoTexture = FindSiblingPbrTexture(m.diffuseTexture, mtlDir, { "_AO", "AO", "_Occlusion", "Occlusion" });
+	}
+}
 // -------------------------------------------------------
 // MTL loader
 // -------------------------------------------------------
@@ -41,8 +172,7 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 		std::istringstream ss(line);
 		std::string token;
 		ss >> token;
-		std::string tokenLower = token;
-		std::transform(tokenLower.begin(), tokenLower.end(), tokenLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		std::string tokenLower = ToLowerCopy(token);
 		if (token == "newmtl")
 		{
 			Material m;
@@ -53,21 +183,21 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 		else if (curIdx >= 0)
 		{
 			Material& cur = mats[curIdx];
-				if (tokenLower == "kd")
-				{
-					ss >> cur.diffuse.x >> cur.diffuse.y >> cur.diffuse.z;
-					cur.diffuse.w = 1.f;
-				}
-				else if (tokenLower == "ks")
-				{
-					ss >> cur.specular.x >> cur.specular.y >> cur.specular.z;
-				}
-				else if (tokenLower == "ns")
-				{
-					ss >> cur.shininess;
-				}
-				else if (tokenLower == "d")
-				{
+			if (tokenLower == "kd")
+			{
+				ss >> cur.diffuse.x >> cur.diffuse.y >> cur.diffuse.z;
+				cur.diffuse.w = 1.f;
+			}
+			else if (tokenLower == "ks")
+			{
+				ss >> cur.specular.x >> cur.specular.y >> cur.specular.z;
+			}
+			else if (tokenLower == "ns")
+			{
+				ss >> cur.shininess;
+			}
+			else if (tokenLower == "d")
+			{
 				// In Sponza's MTL, d=0 is incorrectly used but means opaque.
 				// Only treat as transparent if d is between 0 and 1 exclusive.
 				float d = 1.f;
@@ -75,31 +205,42 @@ bool ObjLoader::LoadMtl(const std::string& mtlPath, std::vector<Material>& mats)
 				// Clamp: if d==0 treat as fully opaque (Sponza quirk)
 				cur.diffuse.w = (d <= 0.f) ? 1.f : d;
 			}
-				else if (tokenLower == "tr")
-				{
-					float tr = 0.f;
-					ss >> tr;
-					cur.diffuse.w = 1.f - tr;
-				}
-				else if (tokenLower == "map_kd" || tokenLower == "map_ka" || tokenLower == "map_bump" || tokenLower == "bump" || tokenLower == "disp" || tokenLower == "map_disp")
-				{
-				// Read rest of line (path may contain spaces)
-				std::string tex;
-				std::getline(ss, tex);
-				tex = Trim(tex);
-				// Normalize backslashes to forward slashes
-				for (char& c : tex) if (c == '\\') c = '/';
-				// Strip any leading "./" or ".\\"
-				if (tex.size() > 2 && tex[0] == '.' && tex[1] == '/')
-					tex = tex.substr(2);
-					if (tokenLower == "map_kd" || tokenLower == "map_ka")
-						cur.diffuseTexture = tex;
-					else if (tokenLower == "map_bump" || tokenLower == "bump")
-						cur.normalTexture = tex;
-					else
-						cur.displacementTexture = tex;
-				}
+			else if (tokenLower == "tr")
+			{
+				float tr = 0.f;
+				ss >> tr;
+				cur.diffuse.w = 1.f - tr;
+			}
+			else if (tokenLower == "map_kd" || tokenLower == "map_ka" ||
+				tokenLower == "map_bump" || tokenLower == "bump" || tokenLower == "norm" ||
+				tokenLower == "disp" || tokenLower == "map_disp" ||
+				tokenLower == "map_pr" || tokenLower == "map_roughness" || tokenLower == "roughness" ||
+				tokenLower == "map_pm" || tokenLower == "map_metallic" || tokenLower == "metallic" ||
+				tokenLower == "map_ao" || tokenLower == "ao" || tokenLower == "map_occlusion")
+			{
+				std::string tex = ExtractTexturePath(ss);
+				if (tokenLower == "map_kd" || tokenLower == "map_ka")
+					cur.diffuseTexture = tex;
+				else if (tokenLower == "map_bump" || tokenLower == "bump" || tokenLower == "norm")
+					cur.normalTexture = tex;
+				else if (tokenLower == "map_pr" || tokenLower == "map_roughness" || tokenLower == "roughness")
+					cur.roughnessTexture = tex;
+				else if (tokenLower == "map_pm" || tokenLower == "map_metallic" || tokenLower == "metallic")
+					cur.metallicTexture = tex;
+				else if (tokenLower == "map_ao" || tokenLower == "ao" || tokenLower == "map_occlusion")
+					cur.aoTexture = tex;
+				else
+					cur.displacementTexture = tex;
+			}
 		}
+	}
+
+	PopulatePbrTextureFallbacks(mtlPath, mats);
+	const std::string mtlBaseDir = std::filesystem::path(mtlPath).parent_path().generic_string();
+	for (Material& material : mats)
+	{
+		if (material.textureBaseDir.empty())
+			material.textureBaseDir = mtlBaseDir;
 	}
 	return true;
 }

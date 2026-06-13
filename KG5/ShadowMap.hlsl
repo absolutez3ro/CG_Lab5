@@ -21,9 +21,12 @@ cbuffer MaterialConstants : register(b2)
     int gHasTexture;
     int gHasNormalMap;
     int gHasDisplacementMap;
+    int gHasMetallicMap;
+    int gHasRoughnessMap;
+    int gHasAOMap;
     float gDisplacementScale;
     float gDisplacementBias;
-    float2 gMaterialPad;
+    float3 gMaterialPad;
 };
 
 struct VSIn

@@ -4,12 +4,14 @@
 #include <stdexcept>
 #include <cstdint>
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <cwchar>
 #include <sstream>
 #include <vector>
 #include <filesystem>
 #include <limits>
+#include <initializer_list>
 
 using namespace DirectX;
 
@@ -75,6 +77,7 @@ bool RenderingSystem::Init(HWND hwnd, int width, int height)
 
     CreateRootSignatures();
     CreatePSOs();
+    LoadIBLResources();
     CreateDebugLineResources();
     CreateDebugLinePSO();
     SetupSceneLights();
@@ -210,6 +213,364 @@ std::string RenderingSystem::GetExeDir() const
     return (p == std::string::npos) ? std::string() : path.substr(0, p + 1);
 }
 
+
+namespace
+{
+    std::wstring RS_ToWidePath(const std::string& path)
+    {
+        return std::wstring(path.begin(), path.end());
+    }
+
+    std::string RS_ToUtf8(const std::wstring& text)
+    {
+        if (text.empty())
+            return {};
+
+        const int required = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (required <= 1)
+            return {};
+
+        std::string result(static_cast<size_t>(required - 1), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, result.data(), required, nullptr, nullptr);
+        return result;
+    }
+
+    std::string RS_ToUtf8(const wchar_t* text)
+    {
+        return text ? RS_ToUtf8(std::wstring(text)) : std::string{};
+    }
+
+    const char* RS_DxgiFormatName(DXGI_FORMAT format)
+    {
+        switch (format)
+        {
+        case DXGI_FORMAT_R8G8B8A8_UNORM: return "DXGI_FORMAT_R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return "DXGI_FORMAT_R8G8B8A8_UNORM_SRGB";
+        case DXGI_FORMAT_B8G8R8A8_UNORM: return "DXGI_FORMAT_B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return "DXGI_FORMAT_B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_B8G8R8X8_UNORM: return "DXGI_FORMAT_B8G8R8X8_UNORM";
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: return "DXGI_FORMAT_R16G16B16A16_FLOAT";
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: return "DXGI_FORMAT_R32G32B32A32_FLOAT";
+        case DXGI_FORMAT_R32G32_FLOAT: return "DXGI_FORMAT_R32G32_FLOAT";
+        case DXGI_FORMAT_R32_FLOAT: return "DXGI_FORMAT_R32_FLOAT";
+        case DXGI_FORMAT_R16G16_FLOAT: return "DXGI_FORMAT_R16G16_FLOAT";
+        case DXGI_FORMAT_R16G16_UNORM: return "DXGI_FORMAT_R16G16_UNORM";
+        case DXGI_FORMAT_R8G8_UNORM: return "DXGI_FORMAT_R8G8_UNORM";
+        case DXGI_FORMAT_BC1_UNORM: return "DXGI_FORMAT_BC1_UNORM";
+        case DXGI_FORMAT_BC2_UNORM: return "DXGI_FORMAT_BC2_UNORM";
+        case DXGI_FORMAT_BC3_UNORM: return "DXGI_FORMAT_BC3_UNORM";
+        case DXGI_FORMAT_BC4_UNORM: return "DXGI_FORMAT_BC4_UNORM";
+        case DXGI_FORMAT_BC4_SNORM: return "DXGI_FORMAT_BC4_SNORM";
+        case DXGI_FORMAT_BC5_UNORM: return "DXGI_FORMAT_BC5_UNORM";
+        case DXGI_FORMAT_BC5_SNORM: return "DXGI_FORMAT_BC5_SNORM";
+        case DXGI_FORMAT_BC6H_UF16: return "DXGI_FORMAT_BC6H_UF16";
+        case DXGI_FORMAT_BC6H_SF16: return "DXGI_FORMAT_BC6H_SF16";
+        case DXGI_FORMAT_BC7_UNORM: return "DXGI_FORMAT_BC7_UNORM";
+        case DXGI_FORMAT_BC7_UNORM_SRGB: return "DXGI_FORMAT_BC7_UNORM_SRGB";
+        default: return "DXGI_FORMAT_UNKNOWN_OR_OTHER";
+        }
+    }
+
+    void RS_LogDDSHeader(const TextureLoader::DDSData& dds, bool includeResolvedFormat)
+    {
+        char header[512]{};
+        std::snprintf(
+            header,
+            sizeof(header),
+            "[IBL] DDS header: width=%u height=%u mipMapCount=%u flags=0x%08X caps=0x%08X caps2=0x%08X\n",
+            dds.width,
+            dds.height,
+            dds.headerMipMapCount,
+            dds.headerFlags,
+            dds.headerCaps,
+            dds.headerCaps2);
+        OutputDebugStringA(header);
+
+        char pixelFormat[512]{};
+        std::snprintf(
+            pixelFormat,
+            sizeof(pixelFormat),
+            "[IBL] DDS pixel format: flags=0x%08X fourCC=0x%08X rgbBitCount=%u rMask=0x%08X gMask=0x%08X bMask=0x%08X aMask=0x%08X\n",
+            dds.pixelFormatFlags,
+            dds.pixelFormatFourCC,
+            dds.pixelFormatRGBBitCount,
+            dds.pixelFormatRBitMask,
+            dds.pixelFormatGBitMask,
+            dds.pixelFormatBBitMask,
+            dds.pixelFormatABitMask);
+        OutputDebugStringA(pixelFormat);
+
+        if (includeResolvedFormat)
+        {
+            std::string resolved = std::string("[IBL] DDS resolved format: ") + RS_DxgiFormatName(dds.format) + "\n";
+            OutputDebugStringA(resolved.c_str());
+        }
+    }
+}
+
+bool RenderingSystem::TryLoadDDSTexture(
+    const std::wstring& path,
+    UINT srvIndex,
+    bool requireCube,
+    ComPtr<ID3D12Resource>& texture,
+    ComPtr<ID3D12Resource>& upload,
+    const char* debugLabel)
+{
+    const bool isBrdf = (debugLabel != nullptr && std::strcmp(debugLabel, "BRDF LUT") == 0);
+    OutputDebugStringW((std::wstring(isBrdf ? L"[IBL] BRDF LUT file found: " : L"[IBL] DDS file found: ") + path + L"\n").c_str());
+
+    TextureLoader::DDSData dds{};
+    if (!TextureLoader::LoadDDSFromFile(path, dds))
+    {
+        std::string reason = TextureLoader::GetLastError().empty() ? "unsupported DDS format" : TextureLoader::GetLastError();
+        if (isBrdf)
+        {
+            RS_LogDDSHeader(dds, dds.format != DXGI_FORMAT_UNKNOWN);
+            std::wstring msg = L"[IBL] BRDF LUT load failed: " + path + L" | reason=";
+            msg += std::wstring(reason.begin(), reason.end());
+            msg += L"\n";
+            OutputDebugStringW(msg.c_str());
+        }
+        else
+        {
+            std::wstring msg = L"[IBL] DDS load failed: " + path + L" | ";
+            msg += std::wstring(reason.begin(), reason.end());
+            msg += L"\n";
+            OutputDebugStringW(msg.c_str());
+        }
+        return false;
+    }
+    if (isBrdf)
+        RS_LogDDSHeader(dds, true);
+
+    {
+        std::string details = isBrdf ? "[IBL] BRDF LUT DDS details: format=" : "[IBL] DDS details: format=";
+        details += RS_DxgiFormatName(dds.format);
+        details += " width=" + std::to_string(dds.width);
+        details += " height=" + std::to_string(dds.height);
+        details += " mips=" + std::to_string(dds.mipLevels);
+        details += " arraySize=" + std::to_string(dds.arraySize);
+        details += dds.isCubeMap ? " dimension=TextureCube\n" : " dimension=Texture2D\n";
+        OutputDebugStringA(details.c_str());
+    }
+
+    if (requireCube && !dds.isCubeMap)
+    {
+        OutputDebugStringW((std::wstring(L"[IBL] DDS load failed: ") + path + L" | unsupported cubemap: expected TextureCube\n").c_str());
+        return false;
+    }
+    if (!requireCube && dds.isCubeMap)
+    {
+        OutputDebugStringW((std::wstring(isBrdf ? L"[IBL] BRDF LUT load failed: " : L"[IBL] DDS load failed: ") + path + (isBrdf ? L" | reason=unsupported DDS dimension: expected Texture2D\n" : L" | unsupported DDS dimension: expected Texture2D\n")).c_str());
+        return false;
+    }
+    if (!requireCube && dds.arraySize != 1)
+    {
+        OutputDebugStringW((std::wstring(isBrdf ? L"[IBL] BRDF LUT load failed: " : L"[IBL] DDS load failed: ") + path + (isBrdf ? L" | reason=unsupported DDS dimension: expected Texture2D arraySize=1\n" : L" | unsupported DDS dimension: expected Texture2D arraySize=1\n")).c_str());
+        return false;
+    }
+
+    if (!TextureLoader::CreateTextureFromDDS(m_renderer.GetDevice(), m_renderer.GetCmdList(), dds, texture, upload))
+    {
+        std::string reason = TextureLoader::GetLastError().empty() ? "CreateCommittedResource failed" : TextureLoader::GetLastError();
+        std::wstring msg = std::wstring(isBrdf ? L"[IBL] BRDF LUT load failed: " : L"[IBL] DDS GPU upload failed: ") + path + (isBrdf ? L" | reason=" : L" | ");
+        msg += std::wstring(reason.begin(), reason.end());
+        msg += L"\n";
+        OutputDebugStringW(msg.c_str());
+        return false;
+    }
+
+    if (!TextureLoader::CreateShaderResourceView(
+        m_renderer.GetDevice(),
+        texture.Get(),
+        dds.format,
+        dds.isCubeMap,
+        dds.mipLevels,
+        m_renderer.GetSrvCpuHandle(srvIndex)))
+    {
+        OutputDebugStringW((std::wstring(isBrdf ? L"[IBL] BRDF LUT load failed: " : L"[IBL] DDS SRV creation failed: ") + path + (isBrdf ? L" | reason=CreateShaderResourceView failed\n" : L" | CreateShaderResourceView failed\n")).c_str());
+        return false;
+    }
+
+    OutputDebugStringW((std::wstring(isBrdf ? L"[IBL] BRDF LUT loaded successfully: " : L"[IBL] DDS loaded successfully: ") + path + L"\n").c_str());
+    return true;
+}
+
+bool RenderingSystem::TryLoadLDRTexture2D(
+    const std::wstring& path,
+    UINT srvIndex,
+    ComPtr<ID3D12Resource>& texture,
+    ComPtr<ID3D12Resource>& upload)
+{
+    TextureLoader::TextureData data{};
+    if (!TextureLoader::LoadFromFile(path, data))
+        return false;
+    if (!TextureLoader::CreateTexture(m_renderer.GetDevice(), m_renderer.GetCmdList(), data, texture, upload))
+        return false;
+
+    TextureLoader::CreateShaderResourceView(
+        m_renderer.GetDevice(),
+        texture.Get(),
+        data.format,
+        false,
+        1,
+        m_renderer.GetSrvCpuHandle(srvIndex));
+    return true;
+}
+
+bool RenderingSystem::CreateFallbackIBLTexture(
+    UINT srvIndex,
+    bool cube,
+    const std::vector<uint8_t>& rgba,
+    ComPtr<ID3D12Resource>& texture,
+    ComPtr<ID3D12Resource>& upload)
+{
+    if (cube)
+    {
+        // Fallback TextureCube keeps the IBL descriptor table valid when external assets are missing.
+        TextureLoader::DDSData data{};
+        data.width = 1;
+        data.height = 1;
+        data.arraySize = 6;
+        data.mipLevels = 1;
+        data.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        data.isCubeMap = true;
+        data.pixels.reserve(6 * 4);
+        for (UINT face = 0; face < 6; ++face)
+            data.pixels.insert(data.pixels.end(), rgba.begin(), rgba.end());
+        for (UINT face = 0; face < 6; ++face)
+        {
+            D3D12_SUBRESOURCE_DATA sub{};
+            sub.pData = data.pixels.data() + face * 4;
+            sub.RowPitch = 4;
+            sub.SlicePitch = 4;
+            data.subresources.push_back(sub);
+        }
+
+        if (!TextureLoader::CreateTextureFromDDS(m_renderer.GetDevice(), m_renderer.GetCmdList(), data, texture, upload))
+            return false;
+        TextureLoader::CreateShaderResourceView(m_renderer.GetDevice(), texture.Get(), data.format, true, 1, m_renderer.GetSrvCpuHandle(srvIndex));
+        return true;
+    }
+
+    TextureLoader::TextureData data{};
+    data.width = 1;
+    data.height = 1;
+    data.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    data.rowPitch = 4;
+    data.pixels = rgba;
+    if (!TextureLoader::CreateTexture(m_renderer.GetDevice(), m_renderer.GetCmdList(), data, texture, upload))
+        return false;
+    TextureLoader::CreateShaderResourceView(m_renderer.GetDevice(), texture.Get(), data.format, false, 1, m_renderer.GetSrvCpuHandle(srvIndex));
+    return true;
+}
+
+void RenderingSystem::LoadIBLResources()
+{
+    const std::string exeDir = GetExeDir();
+    auto firstExistingPath = [&](std::initializer_list<const char*> relPaths) -> std::wstring
+    {
+        for (const char* rel : relPaths)
+        {
+            const std::string full = exeDir + rel;
+            if (std::filesystem::exists(full))
+                return RS_ToWidePath(full);
+        }
+        return L"";
+    };
+
+    const std::wstring irradiancePath = firstExistingPath({
+        "assets/ibl/IrradianceMap_BC6U.dds",
+        "..\\assets\\ibl\\IrradianceMap_BC6U.dds",
+        "..\\..\\assets\\ibl\\IrradianceMap_BC6U.dds",
+        "..\\..\\..\\assets\\ibl\\IrradianceMap_BC6U.dds",
+        "assets/ibl/irradiance.dds",
+        "..\\assets\\ibl\\irradiance.dds",
+        "..\\..\\assets\\ibl\\irradiance.dds",
+        "..\\..\\..\\assets\\ibl\\irradiance.dds" });
+    const std::wstring prefilterPath = firstExistingPath({
+        "assets/ibl/PreFilteredEnvMap_BC6U.dds",
+        "..\\assets\\ibl\\PreFilteredEnvMap_BC6U.dds",
+        "..\\..\\assets\\ibl\\PreFilteredEnvMap_BC6U.dds",
+        "..\\..\\..\\assets\\ibl\\PreFilteredEnvMap_BC6U.dds",
+        "assets/ibl/prefilter.dds",
+        "..\\assets\\ibl\\prefilter.dds",
+        "..\\..\\assets\\ibl\\prefilter.dds",
+        "..\\..\\..\\assets\\ibl\\prefilter.dds" });
+    const std::wstring brdfDdsPath = firstExistingPath({
+        "assets/ibl/IntegrationMap.dds",
+        "..\\assets\\ibl\\IntegrationMap.dds",
+        "..\\..\\assets\\ibl\\IntegrationMap.dds",
+        "..\\..\\..\\assets\\ibl\\IntegrationMap.dds",
+        "assets/ibl/brdf_lut.dds",
+        "..\\assets\\ibl\\brdf_lut.dds",
+        "..\\..\\assets\\ibl\\brdf_lut.dds",
+        "..\\..\\..\\assets\\ibl\\brdf_lut.dds" });
+    const std::wstring brdfPngPath = firstExistingPath({
+        "assets/ibl/brdf_lut.png",
+        "..\\assets\\ibl\\brdf_lut.png",
+        "..\\..\\assets\\ibl\\brdf_lut.png",
+        "..\\..\\..\\assets\\ibl\\brdf_lut.png" });
+
+    bool irradianceLoaded = false;
+    bool prefilterLoaded = false;
+    bool brdfLoaded = false;
+
+    if (irradiancePath.empty())
+        OutputDebugStringA("[IBL] file not found: assets/ibl/IrradianceMap_BC6U.dds\n");
+    if (prefilterPath.empty())
+        OutputDebugStringA("[IBL] file not found: assets/ibl/PreFilteredEnvMap_BC6U.dds\n");
+    if (brdfDdsPath.empty())
+        OutputDebugStringA("[IBL] file not found: assets/ibl/IntegrationMap.dds\n");
+
+    try
+    {
+        m_renderer.BeginUploadCommands();
+
+        if (!irradiancePath.empty())
+            irradianceLoaded = TryLoadDDSTexture(irradiancePath, IrradianceMapSrvIndex, true, m_irradianceMap, m_irradianceMapUpload);
+        if (irradianceLoaded)
+            OutputDebugStringA("[IBL] IrradianceMap_BC6U.dds loaded successfully\n");
+        if (!prefilterPath.empty())
+            prefilterLoaded = TryLoadDDSTexture(prefilterPath, PrefilterMapSrvIndex, true, m_prefilterMap, m_prefilterMapUpload);
+        if (prefilterLoaded)
+            OutputDebugStringA("[IBL] PreFilteredEnvMap_BC6U.dds loaded successfully\n");
+        if (!brdfDdsPath.empty())
+            brdfLoaded = TryLoadDDSTexture(brdfDdsPath, BrdfLutSrvIndex, false, m_brdfLut, m_brdfLutUpload, "BRDF LUT");
+        if (brdfLoaded)
+            OutputDebugStringA("[IBL] IntegrationMap.dds BRDF LUT loaded successfully\n");
+        if (!brdfLoaded && !brdfPngPath.empty())
+        {
+            OutputDebugStringW((std::wstring(L"[IBL] BRDF LUT PNG fallback found: ") + brdfPngPath + L"\n").c_str());
+            brdfLoaded = TryLoadLDRTexture2D(brdfPngPath, BrdfLutSrvIndex, m_brdfLut, m_brdfLutUpload);
+            if (brdfLoaded)
+                OutputDebugStringW((std::wstring(L"[IBL] BRDF LUT loaded successfully from PNG fallback: ") + brdfPngPath + L"\n").c_str());
+        }
+
+        if (!irradianceLoaded)
+        {
+            OutputDebugStringA("[IBL] Failed to load assets/ibl/IrradianceMap_BC6U.dds or irradiance.dds; using black fallback diffuse IBL cube.\n");
+            CreateFallbackIBLTexture(IrradianceMapSrvIndex, true, { 0, 0, 0, 255 }, m_irradianceMap, m_irradianceMapUpload);
+        }
+        if (!prefilterLoaded)
+        {
+            OutputDebugStringA("[IBL] Failed to load assets/ibl/PreFilteredEnvMap_BC6U.dds or prefilter.dds; using black fallback specular IBL cube.\n");
+            CreateFallbackIBLTexture(PrefilterMapSrvIndex, true, { 0, 0, 0, 255 }, m_prefilterMap, m_prefilterMapUpload);
+        }
+        if (!brdfLoaded)
+        {
+            OutputDebugStringA("[IBL] WARNING: using neutral fallback BRDF LUT. Failed to load assets/ibl/IntegrationMap.dds, brdf_lut.dds or brdf_lut.png.\n");
+            CreateFallbackIBLTexture(BrdfLutSrvIndex, false, { 255, 0, 0, 255 }, m_brdfLut, m_brdfLutUpload);
+        }
+
+        m_renderer.EndUploadCommands();
+    }
+    catch (...)
+    {
+        OutputDebugStringA("[IBL] Exception while loading IBL resources; renderer initialization will continue without crashing.\n");
+    }
+}
+
 bool RenderingSystem::TryLoadSponzaWithFallbacks()
 {
     const std::string exeDir = GetExeDir();
@@ -233,7 +594,9 @@ bool RenderingSystem::TryLoadSponzaWithFallbacks()
         }
     }
 
-    OutputDebugStringA("[SceneSwitch][Sponza] LoadObj failed for all fallback candidates\n");
+    OutputDebugStringA("[SceneSwitch][Sponza] LoadObj failed for all fallback candidates; trying optional PBR model fallbacks\n");
+    if (TryLoadPBRModelWithFallbacks())
+        return true;
 
     std::wstring msg =
         L"Failed to load Sponza scene.\n\n"
@@ -245,6 +608,52 @@ bool RenderingSystem::TryLoadSponzaWithFallbacks()
     MessageBoxW(nullptr, msg.c_str(), L"Sponza Load Error", MB_OK | MB_ICONERROR);
     return false;
 }
+
+
+bool RenderingSystem::TryLoadPBRModelWithFallbacks()
+{
+    const std::string exeDir = GetExeDir();
+    const char* modelRelPaths[] =
+    {
+        "PBR_models/Cerberus_by_Andrew_Maximov/Cerberus_LP.obj",
+        "PBR_models/wood_root/Asset_wood_root_M_rkswd_LOD0.obj",
+        "model.obj",
+    };
+    const char* prefixes[] =
+    {
+        "assets/",
+        "../assets/",
+        "../../assets/",
+        "../../../assets/",
+    };
+
+    for (const char* modelRel : modelRelPaths)
+    {
+        for (const char* prefix : prefixes)
+        {
+            const std::string rel = std::string(prefix) + modelRel;
+            const std::string fullPath = exeDir + rel;
+            if (!std::filesystem::exists(fullPath))
+                continue;
+
+            std::string msg = std::string("[PBR] Loading OBJ: ") + fullPath + "\n";
+            OutputDebugStringA(msg.c_str());
+            if (m_renderer.LoadObj(fullPath))
+            {
+                msg = std::string("[PBR] Loaded PBR OBJ: ") + fullPath + "\n";
+                OutputDebugStringA(msg.c_str());
+                return true;
+            }
+
+            msg = std::string("[PBR] Found but failed to load OBJ: ") + fullPath + "\n";
+            OutputDebugStringA(msg.c_str());
+        }
+    }
+
+    OutputDebugStringA("[PBR] No OBJ model found. Expected: assets/PBR_models/Cerberus_by_Andrew_Maximov/Cerberus_LP.obj or assets/PBR_models/wood_root/Asset_wood_root_M_rkswd_LOD0.obj\n");
+    return false;
+}
+
 
 void RenderingSystem::ApplySponzaSceneSettings()
 {
@@ -330,6 +739,10 @@ bool RenderingSystem::SwitchToSponzaScene()
         return false;
 
     m_activeSceneKind = DemoSceneKind::Sponza;
+    m_forceMirrorMaterial = false;
+    m_showIBLSkybox = false;
+    m_iblDiffuseStrength = 1.0f;
+    m_iblSpecularStrength = 1.0f;
     ApplySponzaSceneSettings();
     m_renderMainSceneModel = true;
     m_useTessellationForScene = true;
@@ -369,6 +782,10 @@ bool RenderingSystem::SwitchToDirtyScene()
     m_renderer.WaitForIdle();
 
     m_activeSceneKind = DemoSceneKind::DirtyInstancing;
+    m_forceMirrorMaterial = false;
+    m_showIBLSkybox = false;
+    m_iblDiffuseStrength = 1.0f;
+    m_iblSpecularStrength = 1.0f;
     m_renderMainSceneModel = false;
     m_useTessellationForScene = false;
     m_enableFallingLights = false;
@@ -381,6 +798,7 @@ bool RenderingSystem::SwitchToDirtyScene()
     m_billboardInitAttempted = false;
     m_billboardReady = false;
     m_billboardTextureSrv = -1;
+    m_billboardMaterialSrvBase = -1;
     m_billboardVertexBuffer.Reset();
     m_billboardIndexBuffer.Reset();
     m_billboardVbView = {};
@@ -416,6 +834,10 @@ bool RenderingSystem::SwitchToPerlinPlaneScene()
 
     m_renderer.WaitForIdle();
     m_activeSceneKind = DemoSceneKind::PerlinPlane;
+    m_forceMirrorMaterial = false;
+    m_showIBLSkybox = false;
+    m_iblDiffuseStrength = 1.0f;
+    m_iblSpecularStrength = 1.0f;
     m_renderMainSceneModel = false;
     m_useTessellationForScene = true;
     m_enableFallingLights = false;
@@ -444,6 +866,10 @@ bool RenderingSystem::SwitchToAlphaTestShadowScene()
 
     m_renderer.WaitForIdle();
     m_activeSceneKind = DemoSceneKind::AlphaTestShadow;
+    m_forceMirrorMaterial = false;
+    m_showIBLSkybox = false;
+    m_iblDiffuseStrength = 1.0f;
+    m_iblSpecularStrength = 1.0f;
     m_renderMainSceneModel = false;
     m_useTessellationForScene = false;
     m_enableFallingLights = false;
@@ -463,6 +889,126 @@ bool RenderingSystem::SwitchToAlphaTestShadowScene()
     UpdateViewMatrix();
     UpdateWindowTitle();
     m_renderer.WaitForIdle();
+    return true;
+}
+
+bool RenderingSystem::SwitchToPBRModelScene()
+{
+    if (m_activeSceneKind == DemoSceneKind::PBRModel)
+        return true;
+
+    OutputDebugStringA("[SceneSwitch][PBR] Begin\n");
+    m_renderer.WaitForIdle();
+
+    auto findRelativeAsset = [](const std::filesystem::path& relativePath) -> std::string
+    {
+        const std::filesystem::path prefixes[] =
+        {
+            std::filesystem::path("."),
+            std::filesystem::path(".."),
+            std::filesystem::path("..") / "..",
+            std::filesystem::path("..") / ".." / ".."
+        };
+
+        for (const auto& prefix : prefixes)
+        {
+            const std::filesystem::path candidate = prefix / relativePath;
+            if (std::filesystem::exists(candidate))
+                return candidate.generic_string();
+        }
+        return {};
+    };
+
+    const std::string cerberusPath = findRelativeAsset(
+        std::filesystem::path("assets") / "PBR_models" / "Cerberus_by_Andrew_Maximov" / "Cerberus_LP.obj");
+    const std::string woodRootPath = findRelativeAsset(
+        std::filesystem::path("assets") / "PBR_models" / "wood_root" / "Asset_wood_root_M_rkswd_LOD0.obj");
+
+    if (cerberusPath.empty() && woodRootPath.empty())
+    {
+        OutputDebugStringA("[PBR] No PBR demo OBJ models found.\n");
+        return false;
+    }
+    if (cerberusPath.empty())
+        OutputDebugStringA("[PBR] Warning: Cerberus OBJ not found; loading wood_root only.\n");
+    if (woodRootPath.empty())
+        OutputDebugStringA("[PBR] Warning: wood_root OBJ not found; loading Cerberus only.\n");
+
+    m_activeSceneKind = DemoSceneKind::PBRModel;
+    m_forceMirrorMaterial = false;
+    m_showIBLSkybox = true;
+    m_iblDiffuseStrength = 1.0f;
+    m_iblSpecularStrength = 2.0f;
+    m_renderMainSceneModel = true;
+    m_useTessellationForScene = false;
+    m_enableFallingLights = false;
+    m_enableGroundPlane = false;
+    m_sceneObjects.clear();
+    m_showCullingDebugGrid = false;
+    m_billboardReady = false;
+    m_billboardInitAttempted = false;
+    m_billboardTextureSrv = -1;
+    m_billboardMaterialSrvBase = -1;
+    m_billboardVertexBuffer.Reset();
+    m_billboardIndexBuffer.Reset();
+    m_billboardVbView = {};
+    m_billboardIbView = {};
+    m_geometryDebugMode = 0;
+    m_debugStrongDisplacement = 0;
+    m_debugLineVertices.clear();
+    m_activePointLightsForGpu.clear();
+    m_activePointLights = 0;
+    m_rainDebugStats = RainDebugStats{};
+    m_particlesReinitRequested = false;
+
+    if (!m_renderer.LoadPBRDemoModels(cerberusPath, woodRootPath))
+        return false;
+
+    BuildSingleMainSceneObject();
+    m_cameraPos = XMFLOAT3(0.0f, 55.0f, -180.0f);
+    m_yaw = 0.0f;
+    m_pitch = -0.10f;
+    m_moveSpeed = 120.0f;
+    m_tessMinFactor = 1.0f;
+    m_tessMaxFactor = 1.0f;
+    m_tessMinDistance = 5.0f;
+    m_tessMaxDistance = 80.0f;
+    m_ambientColor = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+    m_directionalLightDirection = XMFLOAT3(0.35f, -1.0f, 0.25f);
+    m_directionalLightColor = XMFLOAT3(1.0f, 0.98f, 0.94f);
+    m_directionalLightIntensity = 3.0f;
+    m_enableShadows = 1;
+
+    SetupSceneLights();
+    UpdateViewMatrix();
+    UpdateWindowTitle();
+    m_renderer.WaitForIdle();
+
+    if (!cerberusPath.empty() && !woodRootPath.empty())
+        OutputDebugStringA("[PBR] Loaded demo scene: Cerberus + wood_root\n");
+    else
+        OutputDebugStringA("[PBR] Loaded partial PBR demo scene\n");
+    OutputDebugStringA("[PBR] Cerberus textures: A/M/N/R\n");
+    const auto& loadedMaterials = m_renderer.GetMaterials();
+    if (!loadedMaterials.empty())
+    {
+        const auto& cerberusMaterial = loadedMaterials.front();
+        char materialDebug[512];
+        sprintf_s(
+            materialDebug,
+            "[PBR] Material debug:\n"
+            "Cerberus has albedo map = %s\n"
+            "Cerberus has metallic map = %s\n"
+            "Cerberus has normal map = %s\n"
+            "Cerberus has roughness map = %s\n",
+            cerberusMaterial.hasDiffuseMap ? "true" : "false",
+            cerberusMaterial.hasMetallicMap ? "true" : "false",
+            cerberusMaterial.hasNormalMap ? "true" : "false",
+            cerberusMaterial.hasRoughnessMap ? "true" : "false");
+        OutputDebugStringA(materialDebug);
+    }
+    OutputDebugStringA("[PBR] wood_root textures: Albedo/Normal/Roughness, metallic fallback=0\n");
+    OutputDebugStringA("[SceneSwitch][PBR] End\n");
     return true;
 }
 
@@ -535,6 +1081,21 @@ void RenderingSystem::UpdateWindowTitle() const
             m_perlinNoiseSeed, postLabel, vcrLabel, nauseaLabel, toneLabel, m_exposure, m_gamma);
         SetWindowTextW(m_hwnd, title);
     }
+    else if (m_activeSceneKind == DemoSceneKind::PBRModel)
+    {
+        wchar_t title[512];
+        swprintf_s(title, L"[PBR MODEL] B scene | Shadows:%s | Debug:%u | Mirror:%s | Skybox:%s | IBLspec:%.2f | PostFX:%s | ToneMap:%s | Exposure:%.2f | Gamma:%.2f",
+            m_enableShadows ? L"ON" : L"OFF",
+            m_debugMode,
+            m_forceMirrorMaterial ? L"ON" : L"OFF",
+            m_showIBLSkybox ? L"ON" : L"OFF",
+            m_iblSpecularStrength,
+            postLabel,
+            toneLabel,
+            m_exposure,
+            m_gamma);
+        SetWindowTextW(m_hwnd, title);
+    }
     else
     {
         wchar_t title[512];
@@ -602,6 +1163,8 @@ void RenderingSystem::RequestSceneSwitch(DemoSceneKind scene)
         OutputDebugStringA("[SceneSwitch] Request PerlinPlane\n");
     else if (scene == DemoSceneKind::AlphaTestShadow)
         OutputDebugStringA("[SceneSwitch] Request AlphaTestShadow\n");
+    else if (scene == DemoSceneKind::PBRModel)
+        OutputDebugStringA("[SceneSwitch] Request PBRModel\n");
     else
         OutputDebugStringA("[SceneSwitch] Request Dirty\n");
 
@@ -625,6 +1188,8 @@ bool RenderingSystem::ApplyPendingSceneSwitchIfNeeded()
         return SwitchToPerlinPlaneScene();
     if (requested == DemoSceneKind::AlphaTestShadow)
         return SwitchToAlphaTestShadowScene();
+    if (requested == DemoSceneKind::PBRModel)
+        return SwitchToPBRModelScene();
 
     return SwitchToDirtyScene();
 }
@@ -888,7 +1453,7 @@ bool RenderingSystem::EnsureBillboardResources()
     m_billboardIbView.Format = DXGI_FORMAT_R32_UINT;
     m_billboardIbView.SizeInBytes = sizeof(quadIndices);
 
-    if (m_billboardTextureSrv < 0)
+    if (m_billboardTextureSrv < 0 || m_billboardMaterialSrvBase < 0)
     {
         const std::filesystem::path exeDir(GetExeDir());
         const std::filesystem::path candidates[] =
@@ -906,17 +1471,23 @@ bool RenderingSystem::EnsureBillboardResources()
         for (const std::filesystem::path& candidate : candidates)
         {
             const std::wstring texPath = candidate.wstring();
-            std::string narrow(texPath.begin(), texPath.end());
-            std::string msg = "[Billboard] Trying texture path: " + narrow + "\n";
+            std::string msg = "[Billboard] Trying texture path: " + RS_ToUtf8(texPath) + "\n";
             OutputDebugStringA(msg.c_str());
 
             m_billboardTextureSrv = m_renderer.LoadTextureToSrv(texPath);
             if (m_billboardTextureSrv >= 0)
-                break;
+            {
+                m_billboardMaterialSrvBase = m_renderer.CreateMaterialSrvBlockFromAlbedo(static_cast<UINT>(m_billboardTextureSrv));
+                if (m_billboardMaterialSrvBase >= 0)
+                    break;
+
+                OutputDebugStringA("[Billboard] Failed to create six-SRV material descriptor table. Billboard LOD disabled.\n");
+                m_billboardTextureSrv = -1;
+            }
         }
     }
 
-    if (m_billboardTextureSrv < 0)
+    if (m_billboardTextureSrv < 0 || m_billboardMaterialSrvBase < 0)
     {
         OutputDebugStringA("[Billboard] billboard.png was not found. Billboard LOD disabled.\n");
         m_billboardReady = false;
@@ -1023,7 +1594,12 @@ void RenderingSystem::UploadDebugLines()
     }
 
     void* mapped = nullptr;
-    m_debugLineVertexBuffer->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_debugLineVertexBuffer->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[DebugLines] Failed to map debug line vertex buffer; skipping upload.\n");
+        return;
+    }
     memcpy(mapped, m_debugLineVertices.data(), sizeof(DebugLineVertex) * m_debugLineVertices.size());
     m_debugLineVertexBuffer->Unmap(0, nullptr);
 
@@ -1044,7 +1620,12 @@ void RenderingSystem::DebugLinePass()
     XMStoreFloat4x4(&cb.ViewProj, XMMatrixTranspose(vp));
 
     void* mapped = nullptr;
-    m_debugLineCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_debugLineCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[DebugLines] Failed to map debug line CB; skipping pass.\n");
+        return;
+    }
     memcpy(mapped, &cb, sizeof(cb));
     m_debugLineCB->Unmap(0, nullptr);
 
@@ -1087,13 +1668,33 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     }
     if (key == VK_OEM_PLUS)
     {
-        m_exposure = std::clamp(m_exposure * 1.1f, 0.05f, 8.0f);
+        if (m_activeSceneKind == DemoSceneKind::PBRModel)
+        {
+            m_iblSpecularStrength = std::clamp(m_iblSpecularStrength + 0.25f, 0.0f, 3.0f);
+            char msg[128];
+            sprintf_s(msg, "[PBR] IBL specular strength = %.2f\n", m_iblSpecularStrength);
+            OutputDebugStringA(msg);
+        }
+        else
+        {
+            m_exposure = std::clamp(m_exposure * 1.1f, 0.05f, 8.0f);
+        }
         UpdateWindowTitle();
         return;
     }
     if (key == VK_OEM_MINUS)
     {
-        m_exposure = std::clamp(m_exposure / 1.1f, 0.05f, 8.0f);
+        if (m_activeSceneKind == DemoSceneKind::PBRModel)
+        {
+            m_iblSpecularStrength = std::clamp(m_iblSpecularStrength - 0.25f, 0.0f, 3.0f);
+            char msg[128];
+            sprintf_s(msg, "[PBR] IBL specular strength = %.2f\n", m_iblSpecularStrength);
+            OutputDebugStringA(msg);
+        }
+        else
+        {
+            m_exposure = std::clamp(m_exposure / 1.1f, 0.05f, 8.0f);
+        }
         UpdateWindowTitle();
         return;
     }
@@ -1115,6 +1716,18 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     if (key == 'V')
     {
         RequestSceneSwitch(DemoSceneKind::AlphaTestShadow);
+        return;
+    }
+    if (key == 'B')
+    {
+        RequestSceneSwitch(DemoSceneKind::PBRModel);
+        return;
+    }
+    if (key == 'M' && m_activeSceneKind == DemoSceneKind::PBRModel)
+    {
+        m_forceMirrorMaterial = !m_forceMirrorMaterial;
+        OutputDebugStringA(m_forceMirrorMaterial ? "[PBR] Mirror material override ON\n" : "[PBR] Mirror material override OFF\n");
+        UpdateWindowTitle();
         return;
     }
 
@@ -1204,11 +1817,19 @@ void RenderingSystem::OnKeyDown(WPARAM key)
     // 7=Spot lights only
     // 8=CSM shadow mask
     // 9=CSM cascade colors
+    // 10=IBL diffuse only
+    // 11=IBL specular/reflections only
+    // 12=sampled prefiltered environment only
+    // 13=material buffer (metallic, roughness, AO)
     if (key >= '0' && key <= '9')
     {
         m_debugMode = static_cast<UINT>(key - '0');
         UpdateWindowTitle();
     }
+    if (key == VK_F10) { m_debugMode = 10; UpdateWindowTitle(); }
+    if (key == VK_F11) { m_debugMode = 11; UpdateWindowTitle(); }
+    if (key == VK_F12) { m_debugMode = 12; UpdateWindowTitle(); }
+    if (key == 'N' && m_activeSceneKind == DemoSceneKind::PBRModel) { m_debugMode = 13; UpdateWindowTitle(); }
 
     // Geometry debug visualization (F1..F4):
     // F1 = regular render
@@ -1365,7 +1986,7 @@ void RenderingSystem::CreateRootSignatures()
 {
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0);
 
         CD3DX12_ROOT_PARAMETER params[4];
         params[0].InitAsConstantBufferView(0); // ObjectTransformConstants
@@ -1394,21 +2015,25 @@ void RenderingSystem::CreateRootSignatures()
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 11, 0);
 
         CD3DX12_ROOT_PARAMETER params[2];
         params[0].InitAsConstantBufferView(0); // LightingFrameConstants
         params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
-        CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {
+        CD3DX12_STATIC_SAMPLER_DESC samplers[3] = {
             CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
-            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE),
+            CD3DX12_STATIC_SAMPLER_DESC(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP)
         };
+        samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
             2,
             params,
-            2,
+            3,
             samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -1419,22 +2044,26 @@ void RenderingSystem::CreateRootSignatures()
 
     {
         CD3DX12_DESCRIPTOR_RANGE srvRange;
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 11, 0);
 
         CD3DX12_ROOT_PARAMETER params[3];
         params[0].InitAsConstantBufferView(0); // LightingFrameConstants
         params[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
         params[2].InitAsConstantBufferView(1); // LocalLightConstants
 
-        CD3DX12_STATIC_SAMPLER_DESC samplers[2] = {
+        CD3DX12_STATIC_SAMPLER_DESC samplers[3] = {
             CD3DX12_STATIC_SAMPLER_DESC(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP),
-            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+            CD3DX12_STATIC_SAMPLER_DESC(1, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, 0.0f, 16, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE),
+            CD3DX12_STATIC_SAMPLER_DESC(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP)
         };
+        samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         CD3DX12_ROOT_SIGNATURE_DESC desc(
             3,
             params,
-            2,
+            3,
             samplers,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -1591,8 +2220,8 @@ void RenderingSystem::CreatePSOs()
 
         if (!outBlob)
         {
-            std::string fileUtf8(file, file + std::wcslen(file));
-            std::string lastPathUtf8(lastPath.begin(), lastPath.end());
+            std::string fileUtf8 = RS_ToUtf8(file);
+            std::string lastPathUtf8 = RS_ToUtf8(lastPath);
             std::ostringstream oss;
             oss << "Shader compilation failed for " << fileUtf8
                 << " [entry=" << entry << ", target=" << target
@@ -2125,7 +2754,12 @@ void RenderingSystem::GeometryPass()
     frame.ProceduralNoiseSeed = m_perlinNoiseSeed;
 
     void* frameMapped = nullptr;
-    m_geometryFrameCB->Map(0, nullptr, &frameMapped);
+    HRESULT frameMapHr = m_geometryFrameCB->Map(0, nullptr, &frameMapped);
+    if (FAILED(frameMapHr) || frameMapped == nullptr)
+    {
+        OutputDebugStringA("[GeometryPass] Failed to map geometry frame CB; skipping geometry pass.\n");
+        return;
+    }
     memcpy(frameMapped, &frame, sizeof(frame));
     m_geometryFrameCB->Unmap(0, nullptr);
 
@@ -2137,8 +2771,17 @@ void RenderingSystem::GeometryPass()
 
     void* transformMapped = nullptr;
     void* materialMapped = nullptr;
-    m_objectTransformCB->Map(0, nullptr, &transformMapped);
-    m_materialCB->Map(0, nullptr, &materialMapped);
+    HRESULT transformMapHr = m_objectTransformCB->Map(0, nullptr, &transformMapped);
+    HRESULT materialMapHr = m_materialCB->Map(0, nullptr, &materialMapped);
+    if (FAILED(transformMapHr) || transformMapped == nullptr || FAILED(materialMapHr) || materialMapped == nullptr)
+    {
+        OutputDebugStringA("[GeometryPass] Failed to map object/material CB; skipping geometry pass.\n");
+        if (transformMapped)
+            m_objectTransformCB->Unmap(0, nullptr);
+        if (materialMapped)
+            m_materialCB->Unmap(0, nullptr);
+        return;
+    }
 
     std::uint8_t* transformBase = reinterpret_cast<std::uint8_t*>(transformMapped);
     std::uint8_t* materialBase = reinterpret_cast<std::uint8_t*>(materialMapped);
@@ -2220,6 +2863,9 @@ void RenderingSystem::GeometryPass()
             material.HasTexture = 0;
             material.HasNormalMap = 0;
             material.HasDisplacementMap = 0;
+            material.HasMetallicMap = 0;
+            material.HasRoughnessMap = 0;
+            material.HasAOMap = 0;
             material.DisplacementScale = 0.0f;
             material.DisplacementBias = 0.0f;
 
@@ -2232,7 +2878,7 @@ void RenderingSystem::GeometryPass()
                 material.SpecularPower = mat.specPower;
                 if (mat.diffuseSrvHeapIndex >= 0)
                 {
-                    material.HasTexture = 1;
+                    material.HasTexture = mat.hasDiffuseMap ? 1 : 0;
                     textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
                 }
                 if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
@@ -2245,13 +2891,28 @@ void RenderingSystem::GeometryPass()
                     material.DisplacementScale = mat.displacementScale;
                     material.DisplacementBias = mat.displacementBias;
                 }
+                if (mat.metallicSrvHeapIndex >= 0 && mat.hasMetallicMap)
+                {
+                    material.HasMetallicMap = 1;
+                }
+                if (mat.roughnessSrvHeapIndex >= 0 && mat.hasRoughnessMap)
+                {
+                    material.HasRoughnessMap = 1;
+                }
+                if (mat.aoSrvHeapIndex >= 0 && mat.hasAOMap)
+                {
+                    material.HasAOMap = 1;
+                }
             }
             if (drawAsBillboard)
             {
                 material.HasTexture = 1;
                 material.HasNormalMap = 0;
                 material.HasDisplacementMap = 0;
-                textureSrv = static_cast<UINT>(m_billboardTextureSrv);
+                material.HasMetallicMap = 0;
+                material.HasRoughnessMap = 0;
+                material.HasAOMap = 0;
+                textureSrv = static_cast<UINT>(m_billboardMaterialSrvBase);
             }
 
             const UINT transformOffset = static_cast<UINT>(drawIndex * m_objectTransformCbStride);
@@ -2447,8 +3108,21 @@ void RenderingSystem::ShadowPass()
     {
         void* shadowObjectMapped = nullptr;
         void* shadowMaterialMapped = nullptr;
-        m_shadowObjectTransformCB->Map(0, nullptr, &shadowObjectMapped);
-        m_materialCB->Map(0, nullptr, &shadowMaterialMapped);
+        HRESULT shadowObjectMapHr = m_shadowObjectTransformCB->Map(0, nullptr, &shadowObjectMapped);
+        HRESULT shadowMaterialMapHr = m_materialCB->Map(0, nullptr, &shadowMaterialMapped);
+        if (FAILED(shadowObjectMapHr) || shadowObjectMapped == nullptr ||
+            FAILED(shadowMaterialMapHr) || shadowMaterialMapped == nullptr)
+        {
+            OutputDebugStringA("[ShadowPass] Failed to map shadow object/material constant buffers; skipping shadow pass.\n");
+            if (shadowObjectMapped) m_shadowObjectTransformCB->Unmap(0, nullptr);
+            if (shadowMaterialMapped) m_materialCB->Unmap(0, nullptr);
+            auto toShaderResource = CD3DX12_RESOURCE_BARRIER::Transition(
+                m_shadowMap.Get(),
+                D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList->ResourceBarrier(1, &toShaderResource);
+            return;
+        }
         auto* shadowObjectBase = reinterpret_cast<std::uint8_t*>(shadowObjectMapped);
         auto* shadowMaterialBase = reinterpret_cast<std::uint8_t*>(shadowMaterialMapped);
 
@@ -2458,7 +3132,12 @@ void RenderingSystem::ShadowPass()
         for (UINT cascade = 0; cascade < ShadowCascadeCount; ++cascade)
         {
             void* shadowFrameMapped = nullptr;
-            m_shadowFrameCB->Map(0, nullptr, &shadowFrameMapped);
+            HRESULT shadowFrameMapHr = m_shadowFrameCB->Map(0, nullptr, &shadowFrameMapped);
+            if (FAILED(shadowFrameMapHr) || shadowFrameMapped == nullptr)
+            {
+                OutputDebugStringA("[ShadowPass] Failed to map shadow frame constant buffer; skipping remaining cascades.\n");
+                break;
+            }
             memcpy(
                 reinterpret_cast<std::uint8_t*>(shadowFrameMapped) + cascade * m_shadowFrameCbStride,
                 &m_shadowViewProj[cascade],
@@ -2502,6 +3181,9 @@ void RenderingSystem::ShadowPass()
                     material.HasTexture = 0;
                     material.HasNormalMap = 0;
                     material.HasDisplacementMap = 0;
+                    material.HasMetallicMap = 0;
+                    material.HasRoughnessMap = 0;
+                    material.HasAOMap = 0;
                     material.DisplacementScale = 0.0f;
                     material.DisplacementBias = 0.0f;
 
@@ -2514,7 +3196,7 @@ void RenderingSystem::ShadowPass()
                         material.SpecularPower = mat.specPower;
                         if (mat.diffuseSrvHeapIndex >= 0)
                         {
-                            material.HasTexture = 1;
+                            material.HasTexture = mat.hasDiffuseMap ? 1 : 0;
                             textureSrv = static_cast<UINT>(mat.diffuseSrvHeapIndex);
                         }
                         if (mat.normalSrvHeapIndex >= 0 && mat.hasNormalMap)
@@ -2526,6 +3208,18 @@ void RenderingSystem::ShadowPass()
                             material.HasDisplacementMap = 1;
                             material.DisplacementScale = mat.displacementScale;
                             material.DisplacementBias = mat.displacementBias;
+                        }
+                        if (mat.metallicSrvHeapIndex >= 0 && mat.hasMetallicMap)
+                        {
+                            material.HasMetallicMap = 1;
+                        }
+                        if (mat.roughnessSrvHeapIndex >= 0 && mat.hasRoughnessMap)
+                        {
+                            material.HasRoughnessMap = 1;
+                        }
+                        if (mat.aoSrvHeapIndex >= 0 && mat.hasAOMap)
+                        {
+                            material.HasAOMap = 1;
                         }
                     }
 
@@ -2588,9 +3282,18 @@ void RenderingSystem::UpdateFrameConstants()
     cb.PointLightCount = (std::min)(m_activePointLights, LightingContract::MaxPointLights);
     cb.SpotLightCount = m_activeSpotLights;
     cb.DebugMode = m_debugMode;
+    cb.ForceMirrorMaterial = (m_activeSceneKind == DemoSceneKind::PBRModel && m_forceMirrorMaterial) ? 1u : 0u;
+    cb.IBLDiffuseStrength = m_iblDiffuseStrength;
+    cb.IBLSpecularStrength = m_iblSpecularStrength;
+    cb.ShowIBLSkybox = m_showIBLSkybox ? 1u : 0u;
 
     void* mapped = nullptr;
-    m_frameCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_frameCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Lighting] Failed to map frame CB; skipping frame constants update.\n");
+        return;
+    }
     memcpy(mapped, &cb, sizeof(cb));
     m_frameCB->Unmap(0, nullptr);
 }
@@ -2611,7 +3314,12 @@ void RenderingSystem::UpdateLocalLightConstants()
     }
 
     void* mapped = nullptr;
-    m_localLightsCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_localLightsCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Lighting] Failed to map local lights CB; skipping local light constants update.\n");
+        return;
+    }
     memcpy(mapped, &lights, sizeof(lights));
     m_localLightsCB->Unmap(0, nullptr);
 }
@@ -2627,7 +3335,12 @@ void RenderingSystem::UploadPointLightsToGpu()
     if (pointLightDataSize > 0)
     {
         void* mapped = nullptr;
-        m_pointLightsUploadBuffer->Map(0, nullptr, &mapped);
+        HRESULT mapHr = m_pointLightsUploadBuffer->Map(0, nullptr, &mapped);
+        if (FAILED(mapHr) || mapped == nullptr)
+        {
+            OutputDebugStringA("[Lighting] Failed to map point light upload buffer; skipping point light upload.\n");
+            return;
+        }
         memcpy(mapped, m_activePointLightsForGpu.data(), pointLightDataSize);
         m_pointLightsUploadBuffer->Unmap(0, nullptr);
     }
@@ -2734,7 +3447,12 @@ void RenderingSystem::RainLightProxyPass()
     cb.PointLightCount = m_activePointLights;
 
     void* mapped = nullptr;
-    m_rainProxyFrameCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_rainProxyFrameCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[RainProxy] Failed to map frame CB; skipping rain proxy pass.\n");
+        return;
+    }
     memcpy(mapped, &cb, sizeof(cb));
     m_rainProxyFrameCB->Unmap(0, nullptr);
 
@@ -2825,6 +3543,7 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
 
     if (runParticleFountain)
     {
+        m_renderer.TransitionDepthToDepthRead();
         m_particles.Render(
             cmdList,
             m_sceneColorRtv,
@@ -2836,6 +3555,7 @@ void RenderingSystem::DrawScene(float totalTime, float deltaTime)
             m_directionalLightIntensity,
             m_directionalLightColor,
             m_ambientColor);
+        m_renderer.TransitionDepthToShaderResource();
     }
 
     if (m_activeSceneKind == DemoSceneKind::DirtyInstancing && m_enableCulling && m_showCullingDebugGrid)
@@ -3005,7 +3725,12 @@ void RenderingSystem::PostProcessPass(float totalTime)
     cb.ToneMapWhitePoint = 11.2f;
 
     void* mapped = nullptr;
-    m_postProcessCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_postProcessCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[PostProcess] Failed to map post-process CB; skipping post-process constants update.\n");
+        return;
+    }
     memcpy(mapped, &cb, sizeof(cb));
     m_postProcessCB->Unmap(0, nullptr);
 

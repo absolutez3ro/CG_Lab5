@@ -1,6 +1,9 @@
 Texture2D gDiffuseMap      : register(t0);
 Texture2D gNormalMap       : register(t1);
 Texture2D gDisplacementMap : register(t2);
+Texture2D gMetallicMap     : register(t3);
+Texture2D gRoughnessMap    : register(t4);
+Texture2D gAOMap           : register(t5);
 SamplerState gSampler : register(s0);
 
 cbuffer ObjectTransformConstants : register(b0)
@@ -31,9 +34,12 @@ cbuffer MaterialConstants : register(b2)
     int gHasTexture;
     int gHasNormalMap;
     int gHasDisplacementMap;
+    int gHasMetallicMap;
+    int gHasRoughnessMap;
+    int gHasAOMap;
     float gDisplacementScale;
     float gDisplacementBias;
-    float2 gMaterialPad;
+    float3 gMaterialPad;
 };
 
 struct VSInput
@@ -248,6 +254,11 @@ PSOutput PSMain(DSOutput pin)
     const float finalAlpha = textureAlpha * gMaterialDiffuse.a;
     clip(finalAlpha - 0.5f);
     albedo.a = finalAlpha;
+    // Texture albedo is authored in sRGB; convert only color data to linear for PBR lighting.
+    if (gHasTexture != 0)
+    {
+        albedo.rgb = pow(saturate(albedo.rgb), float3(2.2f, 2.2f, 2.2f));
+    }
     albedo.rgb *= pin.ColorTint.rgb;
 
     if (gUseProceduralDisplacement != 0)
@@ -299,19 +310,26 @@ PSOutput PSMain(DSOutput pin)
         return o;
     }
 
+    // Material GBuffer stores PBR controls: metallic, roughness and ambient occlusion.
+    const float metallic = (gHasMetallicMap != 0) ? saturate(gMetallicMap.Sample(gSampler, pin.TexCoord).r) : 0.0f;
+    float roughness = (gHasRoughnessMap != 0)
+        ? gRoughnessMap.Sample(gSampler, pin.TexCoord).r
+        : saturate(sqrt(2.0f / max(gSpecularPower + 2.0f, 2.0f)));
+    roughness = clamp(roughness, 0.04f, 1.0f);
+    const float ao = (gHasAOMap != 0) ? saturate(gAOMap.Sample(gSampler, pin.TexCoord).r) : 1.0f;
+    const float4 pbrMaterial = float4(metallic, roughness, ao, 1.0f);
+
     if (gGeometryDebugMode == 3)
     {
-        float tessN = saturate(pin.TessFactorN);
-        float3 tessColor = lerp(float3(0.0f, 0.0f, 1.0f), float3(1.0f, 0.15f, 0.0f), tessN);
-        o.Albedo = float4(tessColor, 1.0f);
+        o.Albedo = float4(pbrMaterial.rgb, 1.0f);
         o.Normal = float4(0.5f, 0.5f, 1.0f, 1.0f);
-        o.Material = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        o.Material = pbrMaterial;
         return o;
     }
 
     o.Albedo = albedo;
     o.Normal = float4(n * 0.5f + 0.5f, 1.0f);
-    o.Material = float4(gMaterialSpecular.rgb, saturate(gSpecularPower / 255.0f));
+    o.Material = pbrMaterial;
     return o;
 }
 

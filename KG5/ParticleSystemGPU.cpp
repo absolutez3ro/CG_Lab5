@@ -244,7 +244,9 @@ bool ParticleSystemGPU::CreateResources()
     for (int i = 0; i < 2; ++i)
     {
         PS_ThrowIfFailed(device->CreateCommittedResource(&hpReadback, D3D12_HEAP_FLAG_NONE, &oneUint, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_counterReadback[i])), "Counter readback failed");
-        m_counterReadback[i]->Map(0, nullptr, reinterpret_cast<void**>(&m_counterReadbackMapped[i]));
+        HRESULT mapHr = m_counterReadback[i]->Map(0, nullptr, reinterpret_cast<void**>(&m_counterReadbackMapped[i]));
+        if (FAILED(mapHr) || m_counterReadbackMapped[i] == nullptr)
+            OutputDebugStringA("[Particles] Failed to map counter readback buffer.\n");
     }
 
     auto createUploadCB = [&](UINT size, ComPtr<ID3D12Resource>& out)
@@ -413,7 +415,12 @@ void ParticleSystemGPU::TransitionComputeResources(ID3D12GraphicsCommandList* cm
 void ParticleSystemGPU::ResetCounter(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* counterResource, uint32_t value)
 {
     void* mapped = nullptr;
-    m_counterResetUpload->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_counterResetUpload->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Particles] Failed to map counter reset upload; skipping counter reset.\n");
+        return;
+    }
     memcpy(mapped, &value, sizeof(uint32_t));
     m_counterResetUpload->Unmap(0, nullptr);
 
@@ -447,7 +454,12 @@ void ParticleSystemGPU::Reinitialize(ID3D12GraphicsCommandList* cmdList)
     ParticleUpdateConstants initCb{};
     initCb.MaxParticles = MaxParticles;
     void* mapped = nullptr;
-    m_updateCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_updateCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Particles] Failed to map init update CB; skipping particle reinitialize.\n");
+        return;
+    }
     memcpy(mapped, &initCb, sizeof(initCb));
     m_updateCB->Unmap(0, nullptr);
     cmdList->SetComputeRootConstantBufferView(0, m_updateCB->GetGPUVirtualAddress());
@@ -481,7 +493,12 @@ void ParticleSystemGPU::DispatchBitonicSort(ID3D12GraphicsCommandList* cmdList, 
             sc.SortDescending = 1;
 
             void* mapped = nullptr;
-            m_sortCB->Map(0, nullptr, &mapped);
+            HRESULT mapHr = m_sortCB->Map(0, nullptr, &mapped);
+            if (FAILED(mapHr) || mapped == nullptr)
+            {
+                OutputDebugStringA("[Particles] Failed to map sort CB; aborting sort pass.\n");
+                return;
+            }
             memcpy(mapped, &sc, sizeof(sc));
             m_sortCB->Unmap(0, nullptr);
 
@@ -540,7 +557,12 @@ void ParticleSystemGPU::Update(ID3D12GraphicsCommandList* cmdList, float deltaTi
         emit.EmitterRadius = settings.EmitterRadius;
 
         void* mapped = nullptr;
-        m_emitCB->Map(0, nullptr, &mapped);
+        HRESULT mapHr = m_emitCB->Map(0, nullptr, &mapped);
+        if (FAILED(mapHr) || mapped == nullptr)
+        {
+            OutputDebugStringA("[Particles] Failed to map emit CB; skipping emit pass.\n");
+            return;
+        }
         memcpy(mapped, &emit, sizeof(emit));
         m_emitCB->Unmap(0, nullptr);
 
@@ -569,7 +591,12 @@ void ParticleSystemGPU::Update(ID3D12GraphicsCommandList* cmdList, float deltaTi
     update.EnableGroundCollision = settings.EnableGroundCollision;
 
     void* mapped = nullptr;
-    m_updateCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_updateCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Particles] Failed to map update CB; skipping update pass.\n");
+        return;
+    }
     memcpy(mapped, &update, sizeof(update));
     m_updateCB->Unmap(0, nullptr);
 
@@ -653,7 +680,12 @@ void ParticleSystemGPU::Render(
     rc.AmbientColor = ambientColor;
 
     void* mapped = nullptr;
-    m_renderCB->Map(0, nullptr, &mapped);
+    HRESULT mapHr = m_renderCB->Map(0, nullptr, &mapped);
+    if (FAILED(mapHr) || mapped == nullptr)
+    {
+        OutputDebugStringA("[Particles] Failed to map render CB; skipping particle render.\n");
+        return;
+    }
     memcpy(mapped, &rc, sizeof(rc));
     m_renderCB->Unmap(0, nullptr);
 

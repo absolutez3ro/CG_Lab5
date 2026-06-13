@@ -55,7 +55,11 @@ namespace LightingContract
         UINT PointLightCount;
         UINT SpotLightCount;
         UINT DebugMode;
-        UINT Padding = 0;
+        UINT ForceMirrorMaterial = 0;
+        float IBLDiffuseStrength = 1.0f;
+        float IBLSpecularStrength = 1.0f;
+        UINT ShowIBLSkybox = 0;
+        UINT Padding[60] = {};
     };
 
     struct alignas(256) LocalLightConstants

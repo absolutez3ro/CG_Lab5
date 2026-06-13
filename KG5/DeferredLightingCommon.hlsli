@@ -23,12 +23,76 @@ float3 ReconstructWorldPosition(float2 uv, float depth, float4x4 invViewProj)
     return worldPos.xyz / max(worldPos.w, 1e-6f);
 }
 
-float3 ComputeBlinnPhong(float3 N, float3 V, float3 L, float3 albedo, float3 specColor, float specPower)
+static const float PI = 3.14159265359f;
+
+float DistributionGGX(float3 N, float3 H, float roughness)
 {
-    const float3 H = normalize(L + V);
+    const float a = roughness * roughness;
+    const float a2 = a * a;
+    const float NdotH = max(dot(N, H), 0.0f);
+    const float NdotH2 = NdotH * NdotH;
+    const float denom = (NdotH2 * (a2 - 1.0f) + 1.0f);
+    return a2 / max(PI * denom * denom, 1e-6f);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    // Direct-lighting Smith term from LearnOpenGL: k = (r + 1)^2 / 8.
+    const float r = roughness + 1.0f;
+    const float k = (r * r) / 8.0f;
+    return NdotV / max(NdotV * (1.0f - k) + k, 1e-6f);
+}
+
+float GeometrySchlickGGX_IBL(float NdotV, float roughness)
+{
+    // IBL uses the less aggressive k = roughness^2 / 2 remapping.
+    const float k = (roughness * roughness) / 2.0f;
+    return NdotV / max(NdotV * (1.0f - k) + k, 1e-6f);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness, bool directLighting)
+{
+    const float NdotV = max(dot(N, V), 0.0f);
     const float NdotL = max(dot(N, L), 0.0f);
-    const float specular = pow(max(dot(N, H), 0.0f), max(specPower, 1.0f));
-    return albedo * NdotL + specColor * specular;
+    const float ggxV = directLighting ? GeometrySchlickGGX(NdotV, roughness) : GeometrySchlickGGX_IBL(NdotV, roughness);
+    const float ggxL = directLighting ? GeometrySchlickGGX(NdotL, roughness) : GeometrySchlickGGX_IBL(NdotL, roughness);
+    return ggxV * ggxL;
+}
+
+float3 FresnelSchlick(float cosTheta, float3 F0)
+{
+    return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    return F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
+}
+
+float3 ComputePBRDirectLight(float3 N, float3 V, float3 L, float3 albedo, float metallic, float roughness, float3 radiance)
+{
+    N = normalize(N);
+    V = normalize(V);
+    L = normalize(L);
+    roughness = clamp(roughness, 0.04f, 1.0f);
+    metallic = saturate(metallic);
+
+    const float3 H = normalize(V + L);
+    const float NdotV = max(dot(N, V), 0.0f);
+    const float NdotL = max(dot(N, L), 0.0f);
+    if (NdotL <= 0.0f || NdotV <= 0.0f)
+        return 0.0f;
+
+    const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    const float NDF = DistributionGGX(N, H, roughness);
+    const float G = GeometrySmith(N, V, L, roughness, true);
+    const float3 F = FresnelSchlick(max(dot(H, V), 0.0f), F0);
+
+    const float3 specular = (NDF * G * F) / max(4.0f * NdotV * NdotL, 0.001f);
+    const float3 kS = F;
+    const float3 kD = (1.0f - kS) * (1.0f - metallic);
+
+    return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
 // Educational attenuation model:

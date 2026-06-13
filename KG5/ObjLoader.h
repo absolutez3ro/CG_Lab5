@@ -1,5 +1,8 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <string>
 #include <vector>
@@ -14,6 +17,10 @@ struct Material
 	std::string diffuseTexture;
 	std::string normalTexture;
 	std::string displacementTexture;
+	std::string metallicTexture;
+	std::string roughnessTexture;
+	std::string aoTexture;
+	std::string textureBaseDir; // Per-material base directory for relative texture paths when multiple OBJ meshes are combined.
 };
 struct MeshSubset
 {

@@ -1,5 +1,8 @@
-﻿#pragma once
+#pragma once
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -9,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <filesystem>
 #include "d3dx12.h"
 #include "ObjLoader.h"
 #include "TextureLoader.h"
@@ -51,14 +55,17 @@ struct GeometryFrameConstants
 struct MaterialConstants
 {
     XMFLOAT4 MaterialDiffuse;
-    XMFLOAT4 MaterialSpecular;
-    float SpecularPower;
+    XMFLOAT4 MaterialSpecular; // Legacy OBJ/MTL value kept for compatibility.
+    float SpecularPower;       // Legacy shininess; geometry pass only uses it to derive fallback PBR roughness.
     int HasTexture;
     int HasNormalMap;
     int HasDisplacementMap;
+    int HasMetallicMap;
+    int HasRoughnessMap;
+    int HasAOMap;
     float DisplacementScale;
     float DisplacementBias;
-    float Pad[2];
+    float Pad[3];
 };
 
 static_assert(sizeof(ObjectTransformConstants) % 16 == 0, "ObjectTransformConstants must be 16-byte aligned for HLSL packing.");
@@ -74,16 +81,29 @@ struct GpuMaterial {
     ComPtr<ID3D12Resource> normalTextureUpload;
     ComPtr<ID3D12Resource> displacementTexture;
     ComPtr<ID3D12Resource> displacementTextureUpload;
+    ComPtr<ID3D12Resource> metallicTexture;
+    ComPtr<ID3D12Resource> metallicTextureUpload;
+    ComPtr<ID3D12Resource> roughnessTexture;
+    ComPtr<ID3D12Resource> roughnessTextureUpload;
+    ComPtr<ID3D12Resource> aoTexture;
+    ComPtr<ID3D12Resource> aoTextureUpload;
     int diffuseSrvHeapIndex = -1;
     int normalSrvHeapIndex = -1;
     int displacementSrvHeapIndex = -1;
+    int metallicSrvHeapIndex = -1;
+    int roughnessSrvHeapIndex = -1;
+    int aoSrvHeapIndex = -1;
     XMFLOAT4 diffuse = { 1, 1, 1, 1 };
     XMFLOAT4 specular = { 1, 1, 1, 1 };
     float specPower = 32.0f;
     float displacementScale = 0.0f;
     float displacementBias = 0.0f;
+    bool hasDiffuseMap = false;
     bool hasNormalMap = false;
     bool hasDisplacementMap = false;
+    bool hasMetallicMap = false;
+    bool hasRoughnessMap = false;
+    bool hasAOMap = false;
 };
 
 class Renderer {
@@ -93,12 +113,16 @@ public:
     void EndFrame();
     void OnResize(int width, int height);
     bool LoadObj(const std::string& path);
+    bool LoadPBRDemoModels(const std::string& cerberusObjPath, const std::string& woodRootObjPath);
+    int CreateMaterialSrvBlockFromAlbedo(UINT albedoSrvIndex);
     bool LoadPrimitiveCubeScene();
     bool LoadPrimitivePlaneScene();
     bool LoadAlphaTestShadowScene();
     bool LoadMassPrimitiveScene();
     int LoadTextureToSrv(const std::wstring& texturePath);
     void WaitForIdle() { WaitForGPU(); }
+    void BeginUploadCommands();
+    void EndUploadCommands();
 
     ID3D12Device* GetDevice() { return m_device.Get(); }
     ID3D12GraphicsCommandList* GetCmdList() { return m_cmdList.Get(); }
@@ -151,7 +175,9 @@ public:
     UINT GetIndexCount() const { return m_ibView.SizeInBytes / sizeof(UINT); }
 
     void CreateBuffer(const void* data, UINT size, ID3D12Resource** resource);
+    void TransitionDepthTo(D3D12_RESOURCE_STATES newState);
     void TransitionDepthToShaderResource();
+    void TransitionDepthToDepthRead();
 
 private:
     void CreateDevice();
@@ -164,6 +190,7 @@ private:
     void CreateDefaultTexture();
     void WaitForGPU();
     void MoveToNextFrame();
+    bool UploadObjMesh(ObjMesh& mesh, const std::filesystem::path& fallbackBaseDir);
 
     ComPtr<ID3D12Device> m_device;
     ComPtr<ID3D12CommandQueue> m_cmdQueue;
@@ -188,10 +215,12 @@ private:
     ComPtr<ID3D12Resource> m_vertexBuffer;
     ComPtr<ID3D12Resource> m_indexBuffer;
     ComPtr<ID3D12Resource> m_defaultWhiteTexture;
+    ComPtr<ID3D12Resource> m_defaultBlackTexture;
     std::vector<ComPtr<ID3D12Resource>> m_extraTextures;
     std::vector<ComPtr<ID3D12Resource>> m_extraTextureUploads;
     ComPtr<ID3D12Resource> m_defaultWhiteUpload;
-    bool m_forceSponzaDiagnosticMaterialOverride = true;
+    ComPtr<ID3D12Resource> m_defaultBlackUpload;
+    bool m_forceSponzaDiagnosticMaterialOverride = false;
     ComPtr<ID3D12Resource> m_globalOverrideNormalTexture;
     ComPtr<ID3D12Resource> m_globalOverrideNormalUpload;
     ComPtr<ID3D12Resource> m_globalOverrideDisplacementTexture;

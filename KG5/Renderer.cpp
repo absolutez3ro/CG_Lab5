@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <sstream>
 
 static void ThrowIfFailedRenderer(HRESULT hr)
 {
@@ -43,6 +44,20 @@ bool Renderer::Init(HWND hwnd, int width, int height)
     }
 
     return true;
+}
+
+void Renderer::BeginUploadCommands()
+{
+    ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
+    ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
+}
+
+void Renderer::EndUploadCommands()
+{
+    ThrowIfFailedRenderer(m_cmdList->Close());
+    ID3D12CommandList* cmdLists[] = { m_cmdList.Get() };
+    m_cmdQueue->ExecuteCommandLists(1, cmdLists);
+    WaitForGPU();
 }
 
 void Renderer::CreateDevice()
@@ -166,12 +181,15 @@ void Renderer::CreateDescriptorHeaps()
 
 void Renderer::CreateDefaultTexture()
 {
-    TextureLoader::TextureData defaultTex;
-    defaultTex.width = 1;
-    defaultTex.height = 1;
-    defaultTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    defaultTex.rowPitch = 4;
-    defaultTex.pixels = { 255, 255, 255, 255 };
+    TextureLoader::TextureData defaultWhiteTex;
+    defaultWhiteTex.width = 1;
+    defaultWhiteTex.height = 1;
+    defaultWhiteTex.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    defaultWhiteTex.rowPitch = 4;
+    defaultWhiteTex.pixels = { 255, 255, 255, 255 };
+
+    TextureLoader::TextureData defaultBlackTex = defaultWhiteTex;
+    defaultBlackTex.pixels = { 0, 0, 0, 255 };
 
     ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
     ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
@@ -179,11 +197,21 @@ void Renderer::CreateDefaultTexture()
     if (!TextureLoader::CreateTexture(
         m_device.Get(),
         m_cmdList.Get(),
-        defaultTex,
+        defaultWhiteTex,
         m_defaultWhiteTexture,
         m_defaultWhiteUpload))
     {
-        throw std::runtime_error("Failed to create default texture");
+        throw std::runtime_error("Failed to create default white texture");
+    }
+
+    if (!TextureLoader::CreateTexture(
+        m_device.Get(),
+        m_cmdList.Get(),
+        defaultBlackTex,
+        m_defaultBlackTexture,
+        m_defaultBlackUpload))
+    {
+        throw std::runtime_error("Failed to create default black texture");
     }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -314,17 +342,27 @@ void Renderer::EndFrame()
 }
 
 
-void Renderer::TransitionDepthToShaderResource()
+void Renderer::TransitionDepthTo(D3D12_RESOURCE_STATES newState)
 {
-    if (m_depthState == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+    if (!m_depthStencil || m_depthState == newState)
         return;
 
     auto depthBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
         m_depthStencil.Get(),
         m_depthState,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        newState);
     m_cmdList->ResourceBarrier(1, &depthBarrier);
-    m_depthState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    m_depthState = newState;
+}
+
+void Renderer::TransitionDepthToShaderResource()
+{
+    TransitionDepthTo(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+void Renderer::TransitionDepthToDepthRead()
+{
+    TransitionDepthTo(D3D12_RESOURCE_STATE_DEPTH_READ);
 }
 
 void Renderer::CreateBuffer(const void* data, UINT size, ID3D12Resource** resource)
@@ -335,7 +373,12 @@ void Renderer::CreateBuffer(const void* data, UINT size, ID3D12Resource** resour
     if (data)
     {
         void* mapped = nullptr;
-        (*resource)->Map(0, nullptr, &mapped);
+        HRESULT mapHr = (*resource)->Map(0, nullptr, &mapped);
+        if (FAILED(mapHr) || mapped == nullptr)
+        {
+            OutputDebugStringA("[Renderer] Failed to map upload buffer in CreateBuffer.\n");
+            return;
+        }
         memcpy(mapped, data, size);
         (*resource)->Unmap(0, nullptr);
     }
@@ -397,11 +440,179 @@ void Renderer::OnResize(int width, int height)
     m_scissorRect = { 0, 0, m_width, m_height };
 }
 
+
+namespace
+{
+    std::string ToLowerPathString(const std::filesystem::path& path)
+    {
+        std::string value = path.generic_string();
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }
+
+    void ApplyKnownPBRTextures(ObjMesh& mesh, const std::filesystem::path& baseDir)
+    {
+        const std::string modelDirLower = ToLowerPathString(baseDir);
+        auto assignTextureIfExists = [&](std::string& dst, const char* fileName)
+        {
+            if (std::filesystem::exists(baseDir / fileName))
+                dst = fileName;
+        };
+
+        for (Material& material : mesh.materials)
+        {
+            if (material.textureBaseDir.empty())
+                material.textureBaseDir = baseDir.generic_string();
+        }
+
+        if (modelDirLower.find("cerberus_by_andrew_maximov") != std::string::npos)
+        {
+            for (Material& material : mesh.materials)
+            {
+                assignTextureIfExists(material.diffuseTexture, "Cerberus_A.jpg");
+                assignTextureIfExists(material.metallicTexture, "Cerberus_M.jpg");
+                assignTextureIfExists(material.normalTexture, "Cerberus_N.jpg");
+                assignTextureIfExists(material.roughnessTexture, "Cerberus_R.jpg");
+                material.aoTexture.clear();
+            }
+            OutputDebugStringA("[PBR] Applied explicit Cerberus texture mapping: A/M/N/R\n");
+        }
+        else if (modelDirLower.find("wood_root") != std::string::npos)
+        {
+            for (Material& material : mesh.materials)
+            {
+                assignTextureIfExists(material.diffuseTexture, "Asset_wood_root_M_rkswd_2K_Albedo.jpg");
+                assignTextureIfExists(material.normalTexture, "Asset_wood_root_M_rkswd_2K_Normal_LOD0.jpg");
+                assignTextureIfExists(material.roughnessTexture, "Asset_wood_root_M_rkswd_2K_Roughness.jpg");
+                material.metallicTexture.clear();
+                material.aoTexture.clear();
+            }
+            OutputDebugStringA("[PBR] Applied explicit wood_root texture mapping: Albedo/Normal/Roughness, metallic fallback=0\n");
+        }
+    }
+
+    void NormalizeVector(XMFLOAT3& v)
+    {
+        XMVECTOR vec = XMLoadFloat3(&v);
+        if (XMVectorGetX(XMVector3LengthSq(vec)) <= 1.0e-8f)
+            return;
+        vec = XMVector3Normalize(vec);
+        XMStoreFloat3(&v, vec);
+    }
+
+    void NormalizeAndPlaceMesh(ObjMesh& mesh, const XMFLOAT3& targetCenterXZ, float targetHeight)
+    {
+        if (mesh.vertices.empty())
+            return;
+
+        XMFLOAT3 minP = mesh.vertices.front().Position;
+        XMFLOAT3 maxP = mesh.vertices.front().Position;
+        for (const auto& v : mesh.vertices)
+        {
+            minP.x = (std::min)(minP.x, v.Position.x); minP.y = (std::min)(minP.y, v.Position.y); minP.z = (std::min)(minP.z, v.Position.z);
+            maxP.x = (std::max)(maxP.x, v.Position.x); maxP.y = (std::max)(maxP.y, v.Position.y); maxP.z = (std::max)(maxP.z, v.Position.z);
+        }
+
+        const float height = (std::max)(maxP.y - minP.y, 0.001f);
+        const float scale = targetHeight / height;
+        const float centerX = (minP.x + maxP.x) * 0.5f;
+        const float centerZ = (minP.z + maxP.z) * 0.5f;
+
+        for (auto& v : mesh.vertices)
+        {
+            v.Position.x = (v.Position.x - centerX) * scale + targetCenterXZ.x;
+            v.Position.y = (v.Position.y - minP.y) * scale + targetCenterXZ.y;
+            v.Position.z = (v.Position.z - centerZ) * scale + targetCenterXZ.z;
+            NormalizeVector(v.Normal);
+            NormalizeVector(v.Tangent);
+            NormalizeVector(v.Bitangent);
+        }
+    }
+
+    void AppendMesh(ObjMesh& dst, const ObjMesh& src)
+    {
+        const UINT vertexOffset = static_cast<UINT>(dst.vertices.size());
+        const UINT indexOffset = static_cast<UINT>(dst.indices.size());
+        const int materialOffset = static_cast<int>(dst.materials.size());
+
+        dst.vertices.insert(dst.vertices.end(), src.vertices.begin(), src.vertices.end());
+        dst.materials.insert(dst.materials.end(), src.materials.begin(), src.materials.end());
+
+        dst.indices.reserve(dst.indices.size() + src.indices.size());
+        for (UINT index : src.indices)
+            dst.indices.push_back(index + vertexOffset);
+
+        dst.subsets.reserve(dst.subsets.size() + src.subsets.size());
+        for (MeshSubset subset : src.subsets)
+        {
+            subset.indexStart += indexOffset;
+            if (subset.materialIdx >= 0)
+                subset.materialIdx += materialOffset;
+            dst.subsets.push_back(subset);
+        }
+    }
+}
+
 bool Renderer::LoadObj(const std::string& path)
 {
     ObjMesh mesh;
     if (!ObjLoader::Load(path, mesh))
         return false;
+
+    const std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
+    ApplyKnownPBRTextures(mesh, baseDir);
+    return UploadObjMesh(mesh, baseDir);
+}
+
+bool Renderer::LoadPBRDemoModels(const std::string& cerberusObjPath, const std::string& woodRootObjPath)
+{
+    ObjMesh combined;
+    bool loadedAny = false;
+
+    if (!cerberusObjPath.empty())
+    {
+        ObjMesh cerberus;
+        if (ObjLoader::Load(cerberusObjPath, cerberus))
+        {
+            const std::filesystem::path baseDir = std::filesystem::path(cerberusObjPath).parent_path();
+            ApplyKnownPBRTextures(cerberus, baseDir);
+            NormalizeAndPlaceMesh(cerberus, XMFLOAT3(-60.0f, 0.0f, 0.0f), 80.0f);
+            AppendMesh(combined, cerberus);
+            loadedAny = true;
+            OutputDebugStringA((std::string("[PBR] Loaded PBR OBJ: ") + cerberusObjPath + "\n").c_str());
+        }
+        else
+        {
+            OutputDebugStringA((std::string("[PBR] Failed to load Cerberus OBJ: ") + cerberusObjPath + "\n").c_str());
+        }
+    }
+
+    if (!woodRootObjPath.empty())
+    {
+        ObjMesh woodRoot;
+        if (ObjLoader::Load(woodRootObjPath, woodRoot))
+        {
+            const std::filesystem::path baseDir = std::filesystem::path(woodRootObjPath).parent_path();
+            ApplyKnownPBRTextures(woodRoot, baseDir);
+            NormalizeAndPlaceMesh(woodRoot, XMFLOAT3(60.0f, 0.0f, 0.0f), 80.0f);
+            AppendMesh(combined, woodRoot);
+            loadedAny = true;
+            OutputDebugStringA((std::string("[PBR] Loaded PBR OBJ: ") + woodRootObjPath + "\n").c_str());
+        }
+        else
+        {
+            OutputDebugStringA((std::string("[PBR] Failed to load wood_root OBJ: ") + woodRootObjPath + "\n").c_str());
+        }
+    }
+
+    if (!loadedAny)
+        return false;
+
+    return UploadObjMesh(combined, std::filesystem::path("."));
+}
+
+bool Renderer::UploadObjMesh(ObjMesh& mesh, const std::filesystem::path& fallbackBaseDir)
+{
 
     std::vector<Vertex> verts;
     verts.reserve(mesh.vertices.size());
@@ -417,12 +628,54 @@ bool Renderer::LoadObj(const std::string& path)
         verts.push_back(vv);
     }
 
+    const std::filesystem::path baseDir = fallbackBaseDir;
+    for (Material& material : mesh.materials)
+    {
+        if (material.textureBaseDir.empty())
+            material.textureBaseDir = baseDir.generic_string();
+    }
+    const std::string modelDirLower = [&]()
+    {
+        std::string value = baseDir.generic_string();
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    }();
+
+    auto assignTextureIfExists = [&](std::string& dst, const char* fileName)
+    {
+        if (std::filesystem::exists(baseDir / fileName))
+            dst = fileName;
+    };
+
+    // Some downloaded PBR OBJ/MTL files omit non-standard PBR map tokens.
+    // For the known lab assets, assign maps by filename so GeometryPass receives real PBR inputs.
+    if (modelDirLower.find("cerberus_by_andrew_maximov") != std::string::npos)
+    {
+        for (Material& material : mesh.materials)
+        {
+            assignTextureIfExists(material.diffuseTexture, "Cerberus_A.jpg");
+            assignTextureIfExists(material.metallicTexture, "Cerberus_M.jpg");
+            assignTextureIfExists(material.normalTexture, "Cerberus_N.jpg");
+            assignTextureIfExists(material.roughnessTexture, "Cerberus_R.jpg");
+        }
+        OutputDebugStringA("[PBR] Applied explicit Cerberus texture mapping: A/M/N/R\n");
+    }
+    else if (modelDirLower.find("wood_root") != std::string::npos)
+    {
+        for (Material& material : mesh.materials)
+        {
+            assignTextureIfExists(material.diffuseTexture, "Asset_wood_root_M_rkswd_2K_Albedo.jpg");
+            assignTextureIfExists(material.normalTexture, "Asset_wood_root_M_rkswd_2K_Normal_LOD0.jpg");
+            assignTextureIfExists(material.roughnessTexture, "Asset_wood_root_M_rkswd_2K_Roughness.jpg");
+            material.metallicTexture.clear();
+        }
+        OutputDebugStringA("[PBR] Applied explicit wood_root texture mapping: Albedo/Normal/Roughness, metallic fallback=0\n");
+    }
+
     m_subsets = mesh.subsets;
     m_gpuMaterials.clear();
     m_gpuMaterials.resize(mesh.materials.size());
     m_nextSrvIndex = 16;
-
-    const std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
 
     ThrowIfFailedRenderer(m_cmdAllocators[0]->Reset());
     ThrowIfFailedRenderer(m_cmdList->Reset(m_cmdAllocators[0].Get(), nullptr));
@@ -525,26 +778,49 @@ bool Renderer::LoadObj(const std::string& path)
         m_gpuMaterials[i].diffuse = mesh.materials[i].diffuse;
         m_gpuMaterials[i].specular = mesh.materials[i].specular;
         m_gpuMaterials[i].specPower = mesh.materials[i].shininess;
+        m_gpuMaterials[i].hasDiffuseMap = false;
         m_gpuMaterials[i].hasNormalMap = false;
         m_gpuMaterials[i].hasDisplacementMap = false;
+        m_gpuMaterials[i].hasMetallicMap = false;
+        m_gpuMaterials[i].hasRoughnessMap = false;
+        m_gpuMaterials[i].hasAOMap = false;
         m_gpuMaterials[i].displacementScale = 0.0f;
         m_gpuMaterials[i].displacementBias = 0.0f;
 
-        if (m_nextSrvIndex + 2 >= 256)
+        if (m_nextSrvIndex + 5 >= 256)
             continue;
 
+        // Geometry shader expects six consecutive material SRVs: albedo, normal, displacement, metallic, roughness, AO.
         const UINT diffuseSrv = m_nextSrvIndex++;
         const UINT normalSrv = m_nextSrvIndex++;
         const UINT displacementSrv = m_nextSrvIndex++;
+        const UINT metallicSrv = m_nextSrvIndex++;
+        const UINT roughnessSrv = m_nextSrvIndex++;
+        const UINT aoSrv = m_nextSrvIndex++;
         m_gpuMaterials[i].diffuseSrvHeapIndex = static_cast<int>(diffuseSrv);
         m_gpuMaterials[i].normalSrvHeapIndex = static_cast<int>(normalSrv);
         m_gpuMaterials[i].displacementSrvHeapIndex = static_cast<int>(displacementSrv);
+        m_gpuMaterials[i].metallicSrvHeapIndex = static_cast<int>(metallicSrv);
+        m_gpuMaterials[i].roughnessSrvHeapIndex = static_cast<int>(roughnessSrv);
+        m_gpuMaterials[i].aoSrvHeapIndex = static_cast<int>(aoSrv);
+
+        const std::filesystem::path materialBaseDir = mesh.materials[i].textureBaseDir.empty()
+            ? baseDir
+            : std::filesystem::path(mesh.materials[i].textureBaseDir);
+        auto resolveMaterialTexture = [&](const std::filesystem::path& texturePath) -> std::filesystem::path
+        {
+            if (texturePath.empty())
+                return texturePath;
+            if (texturePath.is_absolute())
+                return texturePath;
+            return materialBaseDir / texturePath;
+        };
 
         bool hasDiffuse = false;
         DXGI_FORMAT diffuseFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
         if (!mesh.materials[i].diffuseTexture.empty())
         {
-            std::filesystem::path texPath = baseDir / mesh.materials[i].diffuseTexture;
+            std::filesystem::path texPath = resolveMaterialTexture(mesh.materials[i].diffuseTexture);
             if (tryLoadTexture(
                 texPath,
                 m_gpuMaterials[i].diffuseTexture,
@@ -552,6 +828,7 @@ bool Renderer::LoadObj(const std::string& path)
                 diffuseFormat))
             {
                 hasDiffuse = true;
+                m_gpuMaterials[i].hasDiffuseMap = true;
             }
         }
 
@@ -585,6 +862,71 @@ bool Renderer::LoadObj(const std::string& path)
                 lower.find("height") != std::string::npos;
         };
 
+        auto pushUniquePath = [](std::vector<std::filesystem::path>& paths, const std::filesystem::path& pathToAdd)
+        {
+            if (std::find(paths.begin(), paths.end(), pathToAdd) == paths.end())
+                paths.push_back(pathToAdd);
+        };
+
+        auto replaceCaseInsensitive = [&](std::string value, const std::string& needleText, const std::string& replacement, std::string& out) -> bool
+        {
+            const std::string lower = toLowerCopy(value);
+            const std::string lowerNeedle = toLowerCopy(needleText);
+            const size_t pos = lower.find(lowerNeedle);
+            if (pos == std::string::npos)
+                return false;
+            value.replace(pos, needleText.size(), replacement);
+            out = value;
+            return true;
+        };
+
+        auto replaceSuffixCaseInsensitive = [&](std::string value, const std::string& suffix, const std::string& replacement, std::string& out) -> bool
+        {
+            const std::string lower = toLowerCopy(value);
+            const std::string lowerSuffix = toLowerCopy(suffix);
+            if (lower.size() < lowerSuffix.size() || lower.compare(lower.size() - lowerSuffix.size(), lowerSuffix.size(), lowerSuffix) != 0)
+                return false;
+            value.replace(value.size() - suffix.size(), suffix.size(), replacement);
+            out = value;
+            return true;
+        };
+
+        auto pushWithCommonExtensions = [&](std::vector<std::filesystem::path>& candidates, const std::filesystem::path& parent, const std::string& stemName, const std::string& preferredExt)
+        {
+            if (stemName.empty())
+                return;
+            const std::vector<std::string> extensions = { preferredExt, ".png", ".jpg", ".jpeg", ".tga" };
+            for (const std::string& ext : extensions)
+            {
+                if (ext.empty())
+                    continue;
+                pushUniquePath(candidates, materialBaseDir / (parent / (stemName + ext)));
+            }
+        };
+
+        auto appendPbrSiblingCandidates = [&](std::vector<std::filesystem::path>& candidates, const std::vector<std::string>& replacements)
+        {
+            if (mesh.materials[i].diffuseTexture.empty())
+                return;
+
+            const std::filesystem::path diffuseRel(mesh.materials[i].diffuseTexture);
+            const std::string diffuseStem = diffuseRel.stem().string();
+            const std::string diffuseExt = diffuseRel.extension().string();
+            const std::filesystem::path diffuseParent = diffuseRel.parent_path();
+
+            std::string replaced;
+            for (const std::string& replacement : replacements)
+            {
+                if (replaceSuffixCaseInsensitive(diffuseStem, "_Albedo", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceCaseInsensitive(diffuseStem, "Albedo", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceCaseInsensitive(diffuseStem, "BaseColor", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceCaseInsensitive(diffuseStem, "Diffuse", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceSuffixCaseInsensitive(diffuseStem, "_diff", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceSuffixCaseInsensitive(diffuseStem, "_dif", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+                if (replaceSuffixCaseInsensitive(diffuseStem, "_A", replacement, replaced)) pushWithCommonExtensions(candidates, diffuseParent, replaced, diffuseExt);
+            }
+        };
+
         bool hasNormal = false;
         DXGI_FORMAT normalFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
         {
@@ -603,7 +945,7 @@ bool Renderer::LoadObj(const std::string& path)
             {
                 const std::filesystem::path normalRel(mesh.materials[i].normalTexture);
                 if (!looksLikeDisplacementMapName(normalRel.stem().string()))
-                    normalCandidates.push_back(baseDir / normalRel);
+                    normalCandidates.push_back(resolveMaterialTexture(normalRel));
             }
 
             if (!hasNormal && !mesh.materials[i].diffuseTexture.empty())
@@ -617,10 +959,11 @@ bool Renderer::LoadObj(const std::string& path)
                 {
                     if (stemName.empty())
                         return;
-                    normalCandidates.push_back(baseDir / (diffuseParent / (stemName + diffuseExt)));
+                    normalCandidates.push_back(materialBaseDir / (diffuseParent / (stemName + diffuseExt)));
                 };
 
                 pushNormalCandidate(diffuseStem + "_ddn");
+                appendPbrSiblingCandidates(normalCandidates, { "_Normal_LOD0", "_Normal", "Normal", "_N" });
 
                 const size_t diffPos = diffuseStem.find("_diff");
                 if (diffPos != std::string::npos)
@@ -676,7 +1019,7 @@ bool Renderer::LoadObj(const std::string& path)
                 std::filesystem::path dispRel(mesh.materials[i].displacementTexture);
                 if (!looksLikeNormalMapName(dispRel.stem().string()))
                 {
-                    displacementCandidates.push_back(baseDir / dispRel);
+                    displacementCandidates.push_back(resolveMaterialTexture(dispRel));
                 }
             }
 
@@ -742,6 +1085,67 @@ bool Renderer::LoadObj(const std::string& path)
             displacementSrv,
             hasDisplacement ? m_gpuMaterials[i].displacementTexture.Get() : m_defaultWhiteTexture.Get(),
             hasDisplacement ? displacementFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        bool hasMetallic = false;
+        DXGI_FORMAT metallicFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        std::vector<std::filesystem::path> metallicCandidates;
+        if (!mesh.materials[i].metallicTexture.empty())
+            pushUniquePath(metallicCandidates, resolveMaterialTexture(mesh.materials[i].metallicTexture));
+        appendPbrSiblingCandidates(metallicCandidates, { "_Metallic", "Metallic", "_M" });
+        if (tryLoadTextureCandidates(metallicCandidates, m_gpuMaterials[i].metallicTexture, m_gpuMaterials[i].metallicTextureUpload, metallicFormat))
+        {
+            hasMetallic = true;
+            m_gpuMaterials[i].hasMetallicMap = true;
+        }
+        createSrvAt(
+            metallicSrv,
+            hasMetallic ? m_gpuMaterials[i].metallicTexture.Get() : m_defaultBlackTexture.Get(),
+            hasMetallic ? metallicFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        bool hasRoughness = false;
+        DXGI_FORMAT roughnessFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        std::vector<std::filesystem::path> roughnessCandidates;
+        if (!mesh.materials[i].roughnessTexture.empty())
+            pushUniquePath(roughnessCandidates, resolveMaterialTexture(mesh.materials[i].roughnessTexture));
+        appendPbrSiblingCandidates(roughnessCandidates, { "_Roughness", "Roughness", "_R" });
+        if (tryLoadTextureCandidates(roughnessCandidates, m_gpuMaterials[i].roughnessTexture, m_gpuMaterials[i].roughnessTextureUpload, roughnessFormat))
+        {
+            hasRoughness = true;
+            m_gpuMaterials[i].hasRoughnessMap = true;
+        }
+        createSrvAt(
+            roughnessSrv,
+            hasRoughness ? m_gpuMaterials[i].roughnessTexture.Get() : m_defaultWhiteTexture.Get(),
+            hasRoughness ? roughnessFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        bool hasAO = false;
+        DXGI_FORMAT aoFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        std::vector<std::filesystem::path> aoCandidates;
+        if (!mesh.materials[i].aoTexture.empty())
+            pushUniquePath(aoCandidates, resolveMaterialTexture(mesh.materials[i].aoTexture));
+        appendPbrSiblingCandidates(aoCandidates, { "_AO", "AO", "_Occlusion", "Occlusion" });
+        if (tryLoadTextureCandidates(aoCandidates, m_gpuMaterials[i].aoTexture, m_gpuMaterials[i].aoTextureUpload, aoFormat))
+        {
+            hasAO = true;
+            m_gpuMaterials[i].hasAOMap = true;
+        }
+        createSrvAt(
+            aoSrv,
+            hasAO ? m_gpuMaterials[i].aoTexture.Get() : m_defaultWhiteTexture.Get(),
+            hasAO ? aoFormat : DXGI_FORMAT_R8G8B8A8_UNORM);
+
+        std::ostringstream materialLog;
+        materialLog << "[Material] name=" << mesh.materials[i].name
+            << " diffuse=" << mesh.materials[i].diffuseTexture
+            << " normal=" << mesh.materials[i].normalTexture
+            << " metallic=" << mesh.materials[i].metallicTexture
+            << " roughness=" << mesh.materials[i].roughnessTexture
+            << " hasDiffuseMap=" << (hasDiffuse ? "true" : "false")
+            << " hasNormalMap=" << (hasNormal ? "true" : "false")
+            << " hasMetallicMap=" << (hasMetallic ? "true" : "false")
+            << " hasRoughnessMap=" << (hasRoughness ? "true" : "false")
+            << "\n";
+        OutputDebugStringA(materialLog.str().c_str());
     }
 
     CreateBuffer(
@@ -825,11 +1229,46 @@ int Renderer::LoadTextureToSrv(const std::wstring& texturePath)
     m_extraTextures.push_back(texture);
     m_extraTextureUploads.push_back(upload);
 
-    std::string path(texturePath.begin(), texturePath.end());
-    std::string msg = "[Billboard] Loaded texture: " + path + "\n";
-    OutputDebugStringA(msg.c_str());
+    std::wstring msg = L"[Billboard] Loaded texture: " + texturePath + L"\n";
+    OutputDebugStringW(msg.c_str());
 
     return static_cast<int>(heapIndex);
+}
+
+int Renderer::CreateMaterialSrvBlockFromAlbedo(UINT albedoSrvIndex)
+{
+    if (m_nextSrvIndex + 5 >= 256 || !m_device || !m_cbvSrvHeap || !m_defaultWhiteTexture || !m_defaultBlackTexture)
+    {
+        OutputDebugStringA("[Billboard] Cannot allocate six-descriptor material SRV block\n");
+        return -1;
+    }
+
+    const UINT baseIndex = m_nextSrvIndex;
+    m_nextSrvIndex += 6;
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE sourceAlbedo = GetSrvCpuHandle(albedoSrvIndex);
+    const D3D12_CPU_DESCRIPTOR_HANDLE destAlbedo = GetSrvCpuHandle(baseIndex);
+    m_device->CopyDescriptorsSimple(1, destAlbedo, sourceAlbedo, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    auto createDefaultSrv = [&](UINT heapIndex, ID3D12Resource* resource)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+        m_device->CreateShaderResourceView(resource, &srvDesc, GetSrvCpuHandle(heapIndex));
+    };
+
+    // GeometryPass always expects a six-SRV material table:
+    // albedo, normal, displacement, metallic, roughness and AO.
+    createDefaultSrv(baseIndex + 1, m_defaultWhiteTexture.Get()); // normal is not sampled when HasNormalMap=0
+    createDefaultSrv(baseIndex + 2, m_defaultWhiteTexture.Get()); // displacement is not sampled when HasDisplacementMap=0
+    createDefaultSrv(baseIndex + 3, m_defaultBlackTexture.Get()); // metallic fallback must be black/0
+    createDefaultSrv(baseIndex + 4, m_defaultWhiteTexture.Get()); // roughness fallback texture is white/1
+    createDefaultSrv(baseIndex + 5, m_defaultWhiteTexture.Get()); // AO fallback is white/1
+
+    return static_cast<int>(baseIndex);
 }
 
 bool Renderer::LoadPrimitiveCubeScene()
@@ -887,8 +1326,15 @@ bool Renderer::LoadPrimitiveCubeScene()
     m_gpuMaterials[0].diffuseSrvHeapIndex = 0;
     m_gpuMaterials[0].normalSrvHeapIndex = 0;
     m_gpuMaterials[0].displacementSrvHeapIndex = 0;
+    m_gpuMaterials[0].metallicSrvHeapIndex = 0;
+    m_gpuMaterials[0].roughnessSrvHeapIndex = 0;
+    m_gpuMaterials[0].aoSrvHeapIndex = 0;
+    m_gpuMaterials[0].hasDiffuseMap = false;
     m_gpuMaterials[0].hasNormalMap = false;
     m_gpuMaterials[0].hasDisplacementMap = false;
+    m_gpuMaterials[0].hasMetallicMap = false;
+    m_gpuMaterials[0].hasRoughnessMap = false;
+    m_gpuMaterials[0].hasAOMap = false;
 
     CreateBuffer(verts.data(), static_cast<UINT>(verts.size() * sizeof(Vertex)), &m_vertexBuffer);
     CreateBuffer(indices, sizeof(indices), &m_indexBuffer);
@@ -931,8 +1377,15 @@ bool Renderer::LoadPrimitivePlaneScene()
     m_gpuMaterials[0].diffuseSrvHeapIndex = 0;
     m_gpuMaterials[0].normalSrvHeapIndex = 0;
     m_gpuMaterials[0].displacementSrvHeapIndex = 0;
+    m_gpuMaterials[0].metallicSrvHeapIndex = 0;
+    m_gpuMaterials[0].roughnessSrvHeapIndex = 0;
+    m_gpuMaterials[0].aoSrvHeapIndex = 0;
+    m_gpuMaterials[0].hasDiffuseMap = false;
     m_gpuMaterials[0].hasNormalMap = false;
     m_gpuMaterials[0].hasDisplacementMap = false;
+    m_gpuMaterials[0].hasMetallicMap = false;
+    m_gpuMaterials[0].hasRoughnessMap = false;
+    m_gpuMaterials[0].hasAOMap = false;
 
     CreateBuffer(vertices, sizeof(vertices), &m_vertexBuffer);
     CreateBuffer(indices, sizeof(indices), &m_indexBuffer);
@@ -999,8 +1452,15 @@ bool Renderer::LoadAlphaTestShadowScene()
     m_gpuMaterials[0].diffuseSrvHeapIndex = -1;
     m_gpuMaterials[0].normalSrvHeapIndex = -1;
     m_gpuMaterials[0].displacementSrvHeapIndex = -1;
+    m_gpuMaterials[0].metallicSrvHeapIndex = -1;
+    m_gpuMaterials[0].roughnessSrvHeapIndex = -1;
+    m_gpuMaterials[0].aoSrvHeapIndex = -1;
+    m_gpuMaterials[0].hasDiffuseMap = false;
     m_gpuMaterials[0].hasNormalMap = false;
     m_gpuMaterials[0].hasDisplacementMap = false;
+    m_gpuMaterials[0].hasMetallicMap = false;
+    m_gpuMaterials[0].hasRoughnessMap = false;
+    m_gpuMaterials[0].hasAOMap = false;
 
     constexpr UINT texWidth = 128;
     constexpr UINT texHeight = 64;
@@ -1066,8 +1526,15 @@ bool Renderer::LoadAlphaTestShadowScene()
     m_gpuMaterials[1].diffuseSrvHeapIndex = static_cast<int>(fenceSrv);
     m_gpuMaterials[1].normalSrvHeapIndex = -1;
     m_gpuMaterials[1].displacementSrvHeapIndex = -1;
+    m_gpuMaterials[1].metallicSrvHeapIndex = -1;
+    m_gpuMaterials[1].roughnessSrvHeapIndex = -1;
+    m_gpuMaterials[1].aoSrvHeapIndex = -1;
+    m_gpuMaterials[1].hasDiffuseMap = true;
     m_gpuMaterials[1].hasNormalMap = false;
     m_gpuMaterials[1].hasDisplacementMap = false;
+    m_gpuMaterials[1].hasMetallicMap = false;
+    m_gpuMaterials[1].hasRoughnessMap = false;
+    m_gpuMaterials[1].hasAOMap = false;
     m_gpuMaterials[1].diffuseTexture = fenceTexture;
     m_gpuMaterials[1].diffuseTextureUpload = fenceUpload;
     m_extraTextures.push_back(fenceTexture);

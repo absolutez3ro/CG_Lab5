@@ -1,5 +1,8 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -16,7 +19,7 @@ public:
     {
         Albedo = 0,   // Base color in RGBA8
         Normal = 1,   // Encoded world normal in RGBA16F
-        Material = 2, // Specular.rgb + shininess in alpha
+        Material = 2, // PBR material: metallic, roughness, AO, reserved/1.0
     };
 
     bool Initialize(

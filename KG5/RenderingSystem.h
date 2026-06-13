@@ -1,4 +1,8 @@
 #pragma once
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "Renderer.h"
 #include "GBuffer.h"
 #include "LightingContract.h"
@@ -71,7 +75,8 @@ public:
         DirtyInstancing,
         Sponza,
         PerlinPlane,
-        AlphaTestShadow
+        AlphaTestShadow,
+        PBRModel
     };
 
     bool Init(HWND hwnd, int width, int height);
@@ -84,6 +89,7 @@ public:
     bool SwitchToDirtyScene();
     bool SwitchToPerlinPlaneScene();
     bool SwitchToAlphaTestShadowScene();
+    bool SwitchToPBRModelScene();
     DemoSceneKind GetActiveSceneKind() const { return m_activeSceneKind; }
     void RequestSceneSwitch(DemoSceneKind scene);
     bool ApplyPendingSceneSwitchIfNeeded();
@@ -141,6 +147,7 @@ private:
     void SetupDirtySceneLights();
     std::string GetExeDir() const;
     bool TryLoadSponzaWithFallbacks();
+    bool TryLoadPBRModelWithFallbacks();
     void ApplySponzaSceneSettings();
     void ApplyDirtySceneSettings();
     void ApplyPerlinPlaneSceneSettings();
@@ -154,6 +161,10 @@ private:
     void PostProcessPass(float totalTime);
     void CreateOrResizeSceneColorResources(UINT width, UINT height);
     void TransitionSceneColor(D3D12_RESOURCE_STATES newState);
+    void LoadIBLResources();
+    bool TryLoadDDSTexture(const std::wstring& path, UINT srvIndex, bool requireCube, ComPtr<ID3D12Resource>& texture, ComPtr<ID3D12Resource>& upload, const char* debugLabel = "DDS");
+    bool TryLoadLDRTexture2D(const std::wstring& path, UINT srvIndex, ComPtr<ID3D12Resource>& texture, ComPtr<ID3D12Resource>& upload);
+    bool CreateFallbackIBLTexture(UINT srvIndex, bool cube, const std::vector<uint8_t>& rgba, ComPtr<ID3D12Resource>& texture, ComPtr<ID3D12Resource>& upload);
 
     void InitializeRainLightSystem();
     void SeedRainLightsForSponza();
@@ -194,6 +205,9 @@ private:
     static constexpr UINT PointLightsSrvIndex = 5;
     static constexpr UINT SceneColorRtvIndex = 5;
     static constexpr UINT SceneColorSrvIndex = 8;
+    static constexpr UINT IrradianceMapSrvIndex = 9;
+    static constexpr UINT BrdfLutSrvIndex = 10;
+    static constexpr UINT PrefilterMapSrvIndex = 11;
     static constexpr DXGI_FORMAT SceneColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     static constexpr UINT ShadowMapSrvIndex = 6;
     static constexpr UINT ShadowCascadeCount = RenderingShadowSettings::CascadeCount;
@@ -250,6 +264,12 @@ private:
     ComPtr<ID3D12Resource> m_shadowObjectTransformCB;
     ComPtr<ID3D12Resource> m_postProcessCB;
     ComPtr<ID3D12Resource> m_sceneColor;
+    ComPtr<ID3D12Resource> m_irradianceMap;
+    ComPtr<ID3D12Resource> m_irradianceMapUpload;
+    ComPtr<ID3D12Resource> m_brdfLut;
+    ComPtr<ID3D12Resource> m_brdfLutUpload;
+    ComPtr<ID3D12Resource> m_prefilterMap;
+    ComPtr<ID3D12Resource> m_prefilterMapUpload;
     UINT m_objectTransformCbStride = 0;
     UINT m_materialCbStride = 0;
     UINT m_shadowFrameCbStride = 0;
@@ -300,6 +320,10 @@ private:
     int m_lastMouseY = 0;
 
     UINT m_debugMode = 0;
+    bool m_forceMirrorMaterial = false;
+    bool m_showIBLSkybox = false;
+    float m_iblDiffuseStrength = 1.0f;
+    float m_iblSpecularStrength = 1.0f;
     // Geometry debug modes:
     // 0 = regular shaded output
     // 1 = transformed normal visualization
@@ -347,6 +371,7 @@ private:
     D3D12_VERTEX_BUFFER_VIEW m_billboardVbView{};
     D3D12_INDEX_BUFFER_VIEW m_billboardIbView{};
     int m_billboardTextureSrv = -1;
+    int m_billboardMaterialSrvBase = -1;
     float m_billboardSwitchDistance = 220.0f;
     bool m_billboardInitAttempted = false;
     bool m_billboardReady = false;
